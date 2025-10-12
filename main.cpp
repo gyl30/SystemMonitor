@@ -4,6 +4,20 @@
 #include "main_window.h"
 #include "scoped_exit.h"
 
+static QIcon emoji_to_icon(const QString& emoji, int size)
+{
+    QPixmap pixmap(size, size);
+    pixmap.fill(Qt::transparent);
+    QPainter painter(&pixmap);
+    auto font = QApplication::font();
+    font.setPointSizeF(size * 0.6);
+    painter.setFont(font);
+    painter.setPen(Qt::black);
+    painter.drawText(pixmap.rect(), Qt::AlignCenter, emoji);
+    painter.end();
+    return pixmap;
+}
+
 int main(int argc, char* argv[])
 {
     std::string app_name(argv[0]);
@@ -14,6 +28,7 @@ int main(int argc, char* argv[])
     QApplication app(argc, argv);
 
     main_window main_window;
+    QApplication::setWindowIcon(emoji_to_icon("💧", 64));
     main_window.show();
 
     return QApplication::exec();
