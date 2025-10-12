@@ -99,8 +99,9 @@ add_executable(system_monitor
     log.cpp
     main.cpp
     main_window.cpp
-    database_manager.cpp
     network_info.cpp
+    database_manager.cpp
+    draggable_chart_view.cpp
 )
 
 target_compile_options(system_monitor PRIVATE

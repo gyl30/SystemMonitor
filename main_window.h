@@ -5,12 +5,13 @@
 #include <QDateTime>
 #include <QGraphicsSimpleTextItem>
 #include <QTimer>
-#include <QtCharts/QChartView>
-#include <QtCharts/QSplineSeries>
+#include <QtCharts/QLineSeries>
 #include <QtCharts/QDateTimeAxis>
 #include <QtCharts/QValueAxis>
 #include <QtCharts/QLegendMarker>
 #include "database_manager.h"
+#include "draggable_chart_view.h"    // MODIFICATION
+#include <memory>
 
 QT_USE_NAMESPACE
 
@@ -29,14 +30,14 @@ class main_window : public QMainWindow
     explicit main_window(QWidget* parent = nullptr);
     ~main_window() override;
 
-    void set_database_manager(database_manager* db_manager);
-
    private slots:
     void perform_update_tick();
     void handle_series_hovered(const QPointF& point, bool state);
     void toggle_series_visibility(const QString& name);
-    void handle_user_pan();
     void snap_back_to_live_view();
+    void process_new_interfaces();
+    void onInteractionStarted();     // MODIFICATION: Slot for drag start
+    void onInteractionFinished();    // MODIFICATION: Slot for drag end
 
    private:
     void setup_chart();
@@ -47,7 +48,8 @@ class main_window : public QMainWindow
     void load_data_for_display(const QDateTime& start, const QDateTime& end);
 
     QChart* chart_;
-    QChartView* chart_view_;
+    draggable_chartview* chart_view_;    // MODIFICATION
+
     QDateTimeAxis* axis_x_;
     QValueAxis* axis_y_;
 
@@ -62,9 +64,10 @@ class main_window : public QMainWindow
     QTimer* collection_timer_;
     QTimer* snap_back_timer_;
     bool is_manual_view_active_;
-    bool programmatic_change_;
 
-    database_manager* db_manager_;
+    QStringList new_interfaces_queue_;
+
+    std::unique_ptr<database_manager> db_manager_;
 };
 
 #endif
