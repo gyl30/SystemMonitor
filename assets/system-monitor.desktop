@@ -1,0 +1,12 @@
+[Desktop Entry]
+Version=1.0
+Name=System Monitor
+GenericName=Network Speed Monitor
+Comment=Displays real-time network upload and download speeds.
+Exec=build/system_monitor
+Icon=assets/system_monitor_icon.png
+Type=Application
+Categories=Network;Monitor;System;
+Terminal=false
+StartupNotify=true
+StartupWMClass=system_monitor
