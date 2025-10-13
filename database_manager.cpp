@@ -1,20 +1,15 @@
+#include <cstdlib>
+#include <QThread>
+#include <QVariant>
 #include <QtSql/QSqlQuery>
 #include <QtSql/QSqlError>
-#include <QVariant>
-#include <cstdlib>
+
 #include "log.h"
 #include "database_manager.h"
 
-database_manager::database_manager(const QString& dbPath)
-{
-    db_ = QSqlDatabase::addDatabase("QSQLITE", "traffic_connection");
-    db_.setDatabaseName(dbPath);
-    if (!open_database() || !create_table())
-    {
-        LOG_ERROR("failed to initialize database aborting");
-        exit(EXIT_FAILURE);
-    }
-}
+static QString connection_name() { return QString("traffic_connection_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId())); }
+
+database_manager::database_manager(QString dbPath, QObject* parent) : QObject(parent), db_path_(std::move(dbPath)) {}
 
 database_manager::~database_manager()
 {
@@ -22,6 +17,23 @@ database_manager::~database_manager()
     {
         db_.close();
     }
+    LOG_INFO("database manager destroyed");
+}
+
+void database_manager::initialize()
+{
+    LOG_INFO("initializing database manager in thread {}", QThread::currentThreadId());
+    db_ = QSqlDatabase::addDatabase("QSQLITE", connection_name());
+    db_.setDatabaseName(db_path_);
+
+    if (!open_database() || !create_table())
+    {
+        LOG_ERROR("failed to initialize database aborting initialization");
+        emit initialization_failed();
+        return;
+    }
+
+    prune_old_data(30);
 }
 
 bool database_manager::open_database()
@@ -60,11 +72,11 @@ bool database_manager::create_table()
     return success;
 }
 
-bool database_manager::add_snapshots(const QList<interface_stats>& stats_list, const QDateTime& timestamp)
+void database_manager::add_snapshots(const QList<interface_stats>& stats_list, const QDateTime& timestamp)
 {
-    if (stats_list.isEmpty())
+    if (stats_list.isEmpty() || !db_.isOpen())
     {
-        return true;
+        return;
     }
 
     db_.transaction();
@@ -85,21 +97,25 @@ bool database_manager::add_snapshots(const QList<interface_stats>& stats_list, c
         {
             LOG_ERROR("db add snapshot failed {} {}", stats.name.toStdString(), query.lastError().text().toStdString());
             db_.rollback();
-            return false;
+            return;
         }
     }
 
-    bool success = db_.commit();
-    if (!success)
+    if (!db_.commit())
     {
         LOG_ERROR("db transaction commit failed {}", db_.lastError().text().toStdString());
     }
-    return success;
 }
 
-QList<traffic_point> database_manager::get_snapshots_in_range(const QString& interface_name, const QDateTime& start, const QDateTime& end)
+void database_manager::get_snapshots_in_range(quint64 request_id, const QString& interface_name, const QDateTime& start, const QDateTime& end)
 {
     QList<traffic_point> results;
+    if (!db_.isOpen())
+    {
+        emit snapshots_ready(request_id, interface_name, results);
+        return;
+    }
+
     QSqlQuery query(db_);
 
     qint64 start_ts = start.toMSecsSinceEpoch();
@@ -114,11 +130,9 @@ QList<traffic_point> database_manager::get_snapshots_in_range(const QString& int
 
     if (!query.exec())
     {
-        LOG_ERROR("db get snapshots in range failed {}", query.lastError().text().toStdString());
-        return results;
+        LOG_ERROR("db get snapshots pre-range failed for {} {}", interface_name.toStdString(), query.lastError().text().toStdString());
     }
-
-    if (query.next())
+    else if (query.next())
     {
         results.append({query.value(0).toLongLong(), query.value(1).toULongLong(), query.value(2).toULongLong()});
     }
@@ -133,16 +147,17 @@ QList<traffic_point> database_manager::get_snapshots_in_range(const QString& int
 
     if (!query.exec())
     {
-        LOG_ERROR("db get snapshots in range failed {}", query.lastError().text().toStdString());
-        return results;
+        LOG_ERROR("db get snapshots in-range failed for {} {}", interface_name.toStdString(), query.lastError().text().toStdString());
     }
-
-    while (query.next())
+    else
     {
-        results.append({query.value(0).toLongLong(), query.value(1).toULongLong(), query.value(2).toULongLong()});
+        while (query.next())
+        {
+            results.append({query.value(0).toLongLong(), query.value(1).toULongLong(), query.value(2).toULongLong()});
+        }
     }
 
-    return results;
+    emit snapshots_ready(request_id, interface_name, results);
 }
 
 void database_manager::prune_old_data(int days_to_keep)

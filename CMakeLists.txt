@@ -100,6 +100,7 @@ add_executable(system_monitor
     main.cpp
     main_window.cpp
     network_info.cpp
+    data_collector.cpp
     database_manager.cpp
     draggable_chart_view.cpp
 )

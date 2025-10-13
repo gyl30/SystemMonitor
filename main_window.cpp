@@ -5,28 +5,26 @@
 #include <QApplication>
 #include <QMouseEvent>
 #include <QElapsedTimer>
+#include <QMessageBox>
 
 #include <algorithm>
 
 #include "log.h"
 #include "main_window.h"
-#include "network_info.h"
 
+static constexpr int kDataBufferFactor = 2;
 static constexpr int kVisibleWindowMinutes = 15L;
 static constexpr int kSnapBackTimeoutMs = 5000;
 static constexpr int kCollectionIntervalMs = 1000;
 
-main_window::main_window(QWidget* parent) : QMainWindow(parent), collection_timer_(new QTimer(this)), snap_back_timer_(new QTimer(this))
+main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer_(new QTimer(this))
 {
-    QString db_path = QDir(QApplication::applicationDirPath()).filePath("network_speed.db");
-    db_manager_ = std::make_unique<database_manager>(db_path);
-    db_manager_->prune_old_data(30);
-
     setup_chart();
     setCentralWidget(chart_view_);
     setWindowTitle("网络速度监视器");
     resize(800, 600);
 
+    setup_workers();
     setup_tray_icon();
     tray_icon_->show();
 
@@ -36,8 +34,6 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), collection_time
     LOG_INFO("connecting to draggable chartview signals");
     connect(chart_view_, &draggable_chartview::interaction_started, this, &main_window::onInteractionStarted);
     connect(chart_view_, &draggable_chartview::view_changed_by_drag, this, &main_window::onInteractionFinished);
-
-    connect(collection_timer_, &QTimer::timeout, this, &main_window::perform_update_tick);
 
     color_palette_ << Qt::blue << Qt::red << Qt::green << Qt::magenta << Qt::cyan << Qt::yellow;
 
@@ -51,26 +47,86 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), collection_time
     const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
     const QDateTime start_time = now.addMSecs(-visible_window_msecs);
     load_data_for_display(start_time, now);
-    collection_timer_->start(kCollectionIntervalMs);
 }
 
-main_window::~main_window() = default;
-
-void main_window::perform_update_tick()
+main_window::~main_window()
 {
-    LOG_TRACE("perform update tick");
-    const QDateTime now = QDateTime::currentDateTime();
-    QList<interface_stats> stats = network_info::get_all_stats();
-    db_manager_->add_snapshots(stats, now);
+    LOG_INFO("main window destructor called cleaning up threads");
+    if (data_collector_thread_ != nullptr && data_collector_thread_->isRunning())
+    {
+        data_collector_thread_->quit();
+        data_collector_thread_->wait(1000);
+    }
+    if (db_manager_thread_ != nullptr && db_manager_thread_->isRunning())
+    {
+        db_manager_thread_->quit();
+        db_manager_thread_->wait(1000);
+    }
+    LOG_INFO("threads cleanup finished");
+}
+
+void main_window::setup_workers()
+{
+    db_manager_thread_ = new QThread(this);
+    data_collector_thread_ = new QThread(this);
+
+    QString db_path = QDir(QApplication::applicationDirPath()).filePath("network_speed.db");
+    db_manager_ = new database_manager(db_path);
+    data_collector_ = new data_collector();
+
+    db_manager_->moveToThread(db_manager_thread_);
+    data_collector_->moveToThread(data_collector_thread_);
+
+    connect(data_collector_, &data_collector::stats_collected, this, &main_window::handle_stats_collected);
+    connect(this, &main_window::request_add_snapshots, db_manager_, &database_manager::add_snapshots);
+
+    connect(this, &main_window::request_snapshots_in_range, db_manager_, &database_manager::get_snapshots_in_range);
+    connect(db_manager_, &database_manager::snapshots_ready, this, &main_window::handle_snapshots_loaded);
+
+    connect(this, &main_window::start_collector_timer, data_collector_, &data_collector::start_collection);
+
+    connect(db_manager_thread_, &QThread::started, db_manager_, &database_manager::initialize);
+
+    connect(db_manager_,
+            &database_manager::initialization_failed,
+            this,
+            [this]()
+            {
+                QMessageBox::critical(this, "database error", "failed to initialize the database the application will close.");
+                QApplication::quit();
+            });
+
+    connect(data_collector_thread_, &QThread::finished, data_collector_, &QObject::deleteLater);
+    connect(db_manager_thread_, &QThread::finished, db_manager_, &QObject::deleteLater);
+
+    db_manager_thread_->start();
+    data_collector_thread_->start();
+
+    emit start_collector_timer(kCollectionIntervalMs);
+
+    LOG_INFO("worker threads started");
+}
+
+void main_window::handle_stats_collected(const QList<interface_stats>& stats, const QDateTime& timestamp)
+{
+    LOG_TRACE("received stats from collector");
+    emit request_add_snapshots(stats, timestamp);
 
     bool new_interface_detected = false;
     for (const auto& stat : stats)
     {
-        if (!series_map_.contains(stat.name) && !new_interfaces_queue_.contains(stat.name))
+        if (series_map_.contains(stat.name))
         {
-            new_interfaces_queue_.append(stat.name);
-            new_interface_detected = true;
+            continue;
         }
+
+        if (new_interfaces_queue_.contains(stat.name))
+        {
+            continue;
+        }
+
+        new_interfaces_queue_.append(stat.name);
+        new_interface_detected = true;
     }
 
     if (new_interface_detected)
@@ -80,25 +136,77 @@ void main_window::perform_update_tick()
 
     if (is_manual_view_active_)
     {
-        LOG_TRACE("in manual mode skipping live scroll");
+        return;
     }
-    else
+    for (const auto& stat : stats)
     {
-        const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
-        QDateTime query_start_time = now.addMSecs(-visible_window_msecs);
-        load_data_for_display(query_start_time, now);
+        if (series_map_.contains(stat.name))
+        {
+            append_live_data_point(stat, timestamp);
+        }
     }
+
+    const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
+    const QDateTime& end_time = timestamp;
+    QDateTime start_time = end_time.addMSecs(-visible_window_msecs);
+    update_x_axis(start_time, end_time);
+    rescale_y_axis();
 
     if (!chart_view_->property("dragEnabled").toBool() && first_timestamp_.isValid())
     {
-        const qint64 total_duration_seconds = first_timestamp_.secsTo(now);
+        const qint64 total_duration_seconds = first_timestamp_.secsTo(timestamp);
         const qint64 visible_window_seconds = kVisibleWindowMinutes * 60L;
         if (total_duration_seconds > visible_window_seconds)
         {
+            LOG_INFO("sufficient data collected enabling chart dragging");
             chart_view_->set_drag_enabled(true);
             chart_view_->setProperty("dragEnabled", true);
         }
     }
+}
+
+void main_window::append_live_data_point(const interface_stats& current_stats, const QDateTime& timestamp)
+{
+    interface_series& series_pair = series_map_[current_stats.name];
+    const interface_stats& previous_stats = series_pair.last_stats;
+
+    if (previous_stats.name.isEmpty())
+    {
+        series_pair.last_stats = current_stats;
+        series_pair.last_stats.timestamp = timestamp;
+        return;
+    }
+
+    double interval_seconds = static_cast<double>(timestamp.toMSecsSinceEpoch() - previous_stats.timestamp.toMSecsSinceEpoch()) / 1000.0;
+    if (interval_seconds <= 0)
+    {
+        return;
+    }
+
+    quint64 sent_diff =
+        (current_stats.bytes_sent >= previous_stats.bytes_sent) ? (current_stats.bytes_sent - previous_stats.bytes_sent) : current_stats.bytes_sent;
+    quint64 recv_diff = (current_stats.bytes_received >= previous_stats.bytes_received)
+                            ? (current_stats.bytes_received - previous_stats.bytes_received)
+                            : current_stats.bytes_received;
+
+    double upload_speed_kb = (static_cast<double>(sent_diff) / interval_seconds) / 1024.0;
+    double download_speed_kb = (static_cast<double>(recv_diff) / interval_seconds) / 1024.0;
+
+    series_pair.upload->append(static_cast<double>(timestamp.toMSecsSinceEpoch()), upload_speed_kb);
+    series_pair.download->append(static_cast<double>(timestamp.toMSecsSinceEpoch()), download_speed_kb);
+
+    const qint64 cutoff_ms = timestamp.addSecs(-kVisibleWindowMinutes * 60L * kDataBufferFactor).toMSecsSinceEpoch();
+    while (!series_pair.upload->points().isEmpty() && series_pair.upload->points().first().x() < static_cast<qreal>(cutoff_ms))
+    {
+        series_pair.upload->remove(0);
+    }
+    while (!series_pair.download->points().isEmpty() && series_pair.download->points().first().x() < static_cast<qreal>(cutoff_ms))
+    {
+        series_pair.download->remove(0);
+    }
+
+    series_pair.last_stats = current_stats;
+    series_pair.last_stats.timestamp = timestamp;
 }
 
 void main_window::process_new_interfaces()
@@ -114,10 +222,10 @@ void main_window::process_new_interfaces()
     }
     new_interfaces_queue_.clear();
 
-    if (!is_manual_view_active_)
-    {
-        perform_update_tick();
-    }
+    const QDateTime now = QDateTime::currentDateTime();
+    const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
+    const QDateTime start_time = now.addMSecs(-visible_window_msecs);
+    load_data_for_display(start_time, now);
 }
 
 void main_window::onInteractionStarted()
@@ -134,9 +242,7 @@ void main_window::onInteractionStarted()
 void main_window::onInteractionFinished()
 {
     LOG_INFO("interaction finished loading data for the new view range");
-
     load_data_for_display(axis_x_->min(), axis_x_->max());
-
     snap_back_timer_->start(kSnapBackTimeoutMs);
 }
 
@@ -145,7 +251,10 @@ void main_window::snap_back_to_live_view()
     LOG_INFO("snapback timer fired resetting to live view");
     is_manual_view_active_ = false;
     chart_->setTitle("实时网络速度");
-    perform_update_tick();
+    const QDateTime now = QDateTime::currentDateTime();
+    const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
+    QDateTime query_start_time = now.addMSecs(-visible_window_msecs);
+    load_data_for_display(query_start_time, now);
 }
 
 void main_window::setup_chart()
@@ -179,6 +288,7 @@ void main_window::add_series_for_interface(const QString& interface_name)
     {
         return;
     }
+    LOG_INFO("adding new series for interface {}", interface_name.toStdString());
 
     auto* upload_series = new QLineSeries();
     auto* download_series = new QLineSeries();
@@ -222,63 +332,124 @@ void main_window::add_series_for_interface(const QString& interface_name)
 
 void main_window::load_data_for_display(const QDateTime& start, const QDateTime& end)
 {
-    if (db_manager_ == nullptr)
+    if (series_map_.isEmpty())
+    {
+        if (new_interfaces_queue_.isEmpty() && first_timestamp_.isNull())
+        {
+        }
+        else if (series_map_.isEmpty())
+        {
+            return;
+        }
+    }
+
+    current_load_request_id_++;
+    LOG_DEBUG("requesting data load with id {} for range {} {}",
+              current_load_request_id_,
+              start.toString("hh:mm:ss").toStdString(),
+              end.toString("hh:mm:ss").toStdString());
+
+    pending_queries_count_ = series_map_.size();
+    if (pending_queries_count_ == 0)
     {
         return;
     }
-    LOG_DEBUG("loading data for range {} {}", start.toString("hh:mm:ss").toStdString(), end.toString("hh:mm:ss").toStdString());
 
-    QDateTime actual_start_time = end;
-    bool has_any_data = false;
-    const auto interface_names = series_map_.keys();
-    for (const QString& name : interface_names)
+    loaded_data_start_time_ = end;
+
+    for (const QString& name : series_map_.keys())
     {
-        QList<traffic_point> snapshots = db_manager_->get_snapshots_in_range(name, start, end);
-        std::sort(snapshots.begin(), snapshots.end(), [](const traffic_point& a, const traffic_point& b) { return a.timestamp_ms < b.timestamp_ms; });
-        QVector<QPointF> upload_points;
-        QVector<QPointF> download_points;
-        if (snapshots.size() < 2)
+        emit request_snapshots_in_range(current_load_request_id_, name, start, end);
+    }
+}
+
+void main_window::handle_snapshots_loaded(quint64 request_id, const QString& interface_name, const QList<traffic_point>& snapshots)
+{
+    if (request_id != current_load_request_id_)
+    {
+        LOG_DEBUG("ignoring stale data req id {} for interface {} for current req id {}",
+                  request_id,
+                  interface_name.toStdString(),
+                  current_load_request_id_);
+        return;
+    }
+
+    if (!series_map_.contains(interface_name))
+    {
+        pending_queries_count_--;
+        if (pending_queries_count_ <= 0)
         {
-            series_map_[name].upload->replace(upload_points);
-            series_map_[name].download->replace(download_points);
-            continue;
+            process_loaded_data_batch();
         }
-        has_any_data = true;
-        QDateTime series_start_time = QDateTime::fromMSecsSinceEpoch(snapshots[1].timestamp_ms);
-        if (series_start_time < actual_start_time)
+        return;
+    }
+    LOG_TRACE("received snapshot data for {}", interface_name.toStdString());
+
+    QList<traffic_point> sorted_snapshots = snapshots;
+    std::sort(sorted_snapshots.begin(),
+              sorted_snapshots.end(),
+              [](const traffic_point& a, const traffic_point& b) { return a.timestamp_ms < b.timestamp_ms; });
+
+    QVector<QPointF> upload_points;
+    QVector<QPointF> download_points;
+    if (sorted_snapshots.size() >= 2)
+    {
+        QDateTime series_start_time = QDateTime::fromMSecsSinceEpoch(sorted_snapshots[1].timestamp_ms);
+        if (series_start_time < loaded_data_start_time_)
         {
-            actual_start_time = series_start_time;
+            loaded_data_start_time_ = series_start_time;
         }
         if (!first_timestamp_.isValid())
         {
             first_timestamp_ = series_start_time;
         }
-        upload_points.reserve(snapshots.size() - 1);
-        download_points.reserve(snapshots.size() - 1);
-        for (int i = 1; i < snapshots.size(); ++i)
+
+        upload_points.reserve(sorted_snapshots.size() - 1);
+        download_points.reserve(sorted_snapshots.size() - 1);
+        for (int i = 1; i < sorted_snapshots.size(); ++i)
         {
-            const auto& current = snapshots[i];
-            const auto& previous = snapshots[i - 1];
+            const auto& current = sorted_snapshots[i];
+            const auto& previous = sorted_snapshots[i - 1];
             double interval_seconds = static_cast<double>(current.timestamp_ms - previous.timestamp_ms) / 1000.0;
             if (interval_seconds <= 0)
             {
                 continue;
             }
+
             quint64 sent_diff = (current.bytes_sent >= previous.bytes_sent) ? (current.bytes_sent - previous.bytes_sent) : current.bytes_sent;
             quint64 recv_diff =
                 (current.bytes_received >= previous.bytes_received) ? (current.bytes_received - previous.bytes_received) : current.bytes_received;
+
             double upload_speed_kb = (static_cast<double>(sent_diff) / interval_seconds) / 1024.0;
             double download_speed_kb = (static_cast<double>(recv_diff) / interval_seconds) / 1024.0;
             upload_points.append(QPointF(static_cast<double>(current.timestamp_ms), upload_speed_kb));
             download_points.append(QPointF(static_cast<double>(current.timestamp_ms), download_speed_kb));
         }
-        series_map_[name].upload->replace(upload_points);
-        series_map_[name].download->replace(download_points);
-    }
 
-    if (has_any_data && !is_manual_view_active_)
+        const auto& last_snapshot = sorted_snapshots.last();
+        series_map_[interface_name].last_stats = {
+            interface_name, last_snapshot.bytes_received, last_snapshot.bytes_sent, QDateTime::fromMSecsSinceEpoch(last_snapshot.timestamp_ms)};
+    }
+    series_map_[interface_name].upload->replace(upload_points);
+    series_map_[interface_name].download->replace(download_points);
+
+    pending_queries_count_--;
+    if (pending_queries_count_ <= 0)
     {
-        update_x_axis(actual_start_time, end);
+        process_loaded_data_batch();
+    }
+}
+
+void main_window::process_loaded_data_batch()
+{
+    LOG_TRACE("all pending queries finished for request id {} processing batch", current_load_request_id_);
+
+    if (!is_manual_view_active_)
+    {
+        const QDateTime end_time = QDateTime::currentDateTime();
+        const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
+        const QDateTime start_time = end_time.addMSecs(-visible_window_msecs);
+        update_x_axis(start_time, end_time);
     }
     rescale_y_axis();
     update_all_visuals();
@@ -287,26 +458,21 @@ void main_window::load_data_for_display(const QDateTime& start, const QDateTime&
 void main_window::update_x_axis(const QDateTime& start, const QDateTime& end)
 {
     const qint64 duration_seconds = start.secsTo(end);
-    int tick_count = 2;
-    const int two_minutes_in_seconds = 2 * 60;
+    int tick_count;
     if (duration_seconds < 1)
     {
-        tick_count = 1;
+        tick_count = 2;
+        axis_x_->setFormat("hh:mm:ss");
     }
-    else if (duration_seconds <= two_minutes_in_seconds)
+    else if (duration_seconds <= 2L * 60)
     {
         axis_x_->setFormat("hh:mm:ss");
-        tick_count = qBound(2, static_cast<int>(duration_seconds / 15) + 2, 8);
+        tick_count = qBound(2, static_cast<int>(duration_seconds / 15) + 1, 8);
     }
     else
     {
         axis_x_->setFormat("hh:mm");
-        tick_count = qBound(3, static_cast<int>(duration_seconds / 60) + 2, 11);
-    }
-    if (duration_seconds >= (kVisibleWindowMinutes * 60L))
-    {
-        tick_count = 10;
-        axis_x_->setFormat("hh:mm");
+        tick_count = qBound(3, static_cast<int>(duration_seconds / (60L * 2)) + 1, 11);
     }
     axis_x_->setTickCount(tick_count);
     axis_x_->setRange(start, end);
@@ -336,7 +502,7 @@ void main_window::rescale_y_axis()
     }
     constexpr double min_y_range = 100.0;
     double new_max_y = qMax(min_y_range, max_visible_speed * 1.2);
-    if (axis_y_->max() != new_max_y)
+    if (qAbs(axis_y_->max() - new_max_y) > 0.1)
     {
         axis_y_->setRange(0, new_max_y);
     }
@@ -442,6 +608,7 @@ void main_window::closeEvent(QCloseEvent* event)
 void main_window::quit_application()
 {
     LOG_INFO("quitting application via tray menu");
+    hide();
     QApplication::quit();
 }
 

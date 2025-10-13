@@ -3,6 +3,7 @@
 
 #include <QTimer>
 #include <QMenu>
+#include <QThread>
 #include <QDateTime>
 #include <QMainWindow>
 #include <QCloseEvent>
@@ -14,8 +15,7 @@
 #include <QtCharts/QValueAxis>
 #include <QtCharts/QLegendMarker>
 
-#include <memory>
-
+#include "data_collector.h"
 #include "database_manager.h"
 #include "draggable_chart_view.h"
 
@@ -26,6 +26,7 @@ struct interface_series
     QLineSeries* upload = nullptr;
     QLineSeries* download = nullptr;
     QLegendMarker* marker = nullptr;
+    interface_stats last_stats;
 };
 
 class main_window : public QMainWindow
@@ -39,8 +40,14 @@ class main_window : public QMainWindow
    protected:
     void closeEvent(QCloseEvent* event) override;
 
+   signals:
+    void request_add_snapshots(const QList<interface_stats>& stats_list, const QDateTime& timestamp);
+    void request_snapshots_in_range(quint64 request_id, const QString& interface_name, const QDateTime& start, const QDateTime& end);
+    void start_collector_timer(int interval_ms);
+
    private slots:
-    void perform_update_tick();
+    void handle_stats_collected(const QList<interface_stats>& stats, const QDateTime& timestamp);
+    void handle_snapshots_loaded(quint64 request_id, const QString& interface_name, const QList<traffic_point>& snapshots);
     void handle_series_hovered(const QPointF& point, bool state);
     void toggle_series_visibility(const QString& name);
     void snap_back_to_live_view();
@@ -48,17 +55,21 @@ class main_window : public QMainWindow
     void onInteractionStarted();
     void onInteractionFinished();
     void on_tray_icon_activated(QSystemTrayIcon::ActivationReason reason);
-    static void quit_application();
+    void quit_application();
 
    private:
     void setup_chart();
+    void setup_workers();
     void add_series_for_interface(const QString& interface_name);
     void update_x_axis(const QDateTime& start, const QDateTime& end);
     void rescale_y_axis();
     void update_all_visuals();
     void load_data_for_display(const QDateTime& start, const QDateTime& end);
     void setup_tray_icon();
+    void process_loaded_data_batch();
+    void append_live_data_point(const interface_stats& current_stats, const QDateTime& timestamp);
 
+   private:
     QChart* chart_ = nullptr;
     draggable_chartview* chart_view_ = nullptr;
 
@@ -73,13 +84,19 @@ class main_window : public QMainWindow
     QDateTime first_timestamp_;
     QString isolated_interface_name_;
 
-    QTimer* collection_timer_ = nullptr;
     QTimer* snap_back_timer_ = nullptr;
     bool is_manual_view_active_ = false;
 
     QStringList new_interfaces_queue_;
 
-    std::unique_ptr<database_manager> db_manager_;
+    QThread* data_collector_thread_ = nullptr;
+    QThread* db_manager_thread_ = nullptr;
+    data_collector* data_collector_ = nullptr;
+    database_manager* db_manager_ = nullptr;
+
+    quint64 current_load_request_id_ = 0;
+    qint64 pending_queries_count_ = 0;
+    QDateTime loaded_data_start_time_;
 
     QSystemTrayIcon* tray_icon_ = nullptr;
     QMenu* tray_menu_ = nullptr;
