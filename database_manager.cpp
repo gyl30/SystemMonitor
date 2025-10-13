@@ -22,7 +22,6 @@ database_manager::~database_manager()
     {
         db_.close();
     }
-    QSqlDatabase::removeDatabase("traffic_connection");
 }
 
 bool database_manager::open_database()
