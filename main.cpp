@@ -1,5 +1,7 @@
 #include <QApplication>
 #include <QDir>
+#include <QPainter>
+#include <QIcon>
 #include "log.h"
 #include "main_window.h"
 #include "scoped_exit.h"
@@ -27,8 +29,10 @@ int main(int argc, char* argv[])
 
     QApplication app(argc, argv);
 
-    main_window main_window;
+    QApplication::setQuitOnLastWindowClosed(false);
     QApplication::setWindowIcon(emoji_to_icon("💧", 64));
+
+    main_window main_window;
     main_window.show();
 
     return QApplication::exec();

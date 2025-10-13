@@ -1,10 +1,13 @@
 #include <QLegendMarker>
 #include <QGraphicsLayout>
-#include <QElapsedTimer>
-#include <algorithm>
 #include <QDir>
+#include <QAction>
 #include <QApplication>
 #include <QMouseEvent>
+#include <QElapsedTimer>
+
+#include <algorithm>
+
 #include "log.h"
 #include "main_window.h"
 #include "network_info.h"
@@ -13,17 +16,7 @@ static constexpr int kVisibleWindowMinutes = 15L;
 static constexpr int kSnapBackTimeoutMs = 5000;
 static constexpr int kCollectionIntervalMs = 1000;
 
-main_window::main_window(QWidget* parent)
-    : QMainWindow(parent),
-      chart_(nullptr),
-      chart_view_(nullptr),
-      axis_x_(nullptr),
-      axis_y_(nullptr),
-      color_index_(0),
-      tooltip_(nullptr),
-      collection_timer_(new QTimer(this)),
-      snap_back_timer_(new QTimer(this)),
-      is_manual_view_active_(false)
+main_window::main_window(QWidget* parent) : QMainWindow(parent), collection_timer_(new QTimer(this)), snap_back_timer_(new QTimer(this))
 {
     QString db_path = QDir(QApplication::applicationDirPath()).filePath("network_speed.db");
     db_manager_ = std::make_unique<database_manager>(db_path);
@@ -31,13 +24,16 @@ main_window::main_window(QWidget* parent)
 
     setup_chart();
     setCentralWidget(chart_view_);
-    setWindowTitle("Network Speed Monitor");
+    setWindowTitle("网络速度监视器");
     resize(800, 600);
+
+    setup_tray_icon();
+    tray_icon_->show();
 
     snap_back_timer_->setSingleShot(true);
     connect(snap_back_timer_, &QTimer::timeout, this, &main_window::snap_back_to_live_view);
 
-    LOG_INFO("Connecting to DraggableChartView signals...");
+    LOG_INFO("connecting to draggable chartview signals");
     connect(chart_view_, &draggable_chartview::interaction_started, this, &main_window::onInteractionStarted);
     connect(chart_view_, &draggable_chartview::view_changed_by_drag, this, &main_window::onInteractionFinished);
 
@@ -130,7 +126,7 @@ void main_window::onInteractionStarted()
     if (!is_manual_view_active_)
     {
         is_manual_view_active_ = true;
-        chart_->setTitle("Network Speed (Historical View)");
+        chart_->setTitle("网络速度历史视图");
     }
     snap_back_timer_->start(kSnapBackTimeoutMs);
 }
@@ -148,7 +144,7 @@ void main_window::snap_back_to_live_view()
 {
     LOG_INFO("snapback timer fired resetting to live view");
     is_manual_view_active_ = false;
-    chart_->setTitle("Real-time Network Speed");
+    chart_->setTitle("实时网络速度");
     perform_update_tick();
 }
 
@@ -158,7 +154,7 @@ void main_window::setup_chart()
     chart_->setAnimationOptions(QChart::NoAnimation);
     chart_->layout()->setContentsMargins(0, 0, 0, 0);
     chart_->setBackgroundRoundness(0);
-    chart_->setTitle("Real-time Network Speed");
+    chart_->setTitle("实时网络速度");
     chart_->legend()->setVisible(true);
     chart_->legend()->setAlignment(Qt::AlignBottom);
 
@@ -167,11 +163,11 @@ void main_window::setup_chart()
     chart_view_->setRenderHint(QPainter::Antialiasing);
     axis_x_ = new QDateTimeAxis;
     axis_x_->setFormat("hh:mm:ss");
-    axis_x_->setTitleText("Time");
+    axis_x_->setTitleText("时间");
     chart_->addAxis(axis_x_, Qt::AlignBottom);
     axis_y_ = new QValueAxis;
     axis_y_->setLabelFormat("%.1f KB/s");
-    axis_y_->setTitleText("Speed");
+    axis_y_->setTitleText("速度");
     axis_y_->setMinorTickCount(4);
     axis_y_->setRange(0, 100.0);
     chart_->addAxis(axis_y_, Qt::AlignLeft);
@@ -187,7 +183,7 @@ void main_window::add_series_for_interface(const QString& interface_name)
     auto* upload_series = new QLineSeries();
     auto* download_series = new QLineSeries();
     download_series->setName(interface_name);
-    upload_series->setName(interface_name + " Upload");
+    upload_series->setName(interface_name + " 上传");
     QColor base_color = color_palette_[color_index_ % color_palette_.size()];
     color_index_++;
     QPen download_pen(base_color);
@@ -407,12 +403,12 @@ void main_window::handle_series_hovered(const QPointF& point, bool state)
     {
         if (series == series_pair.upload)
         {
-            series_type_name = "Upload";
+            series_type_name = "上传";
             break;
         }
         if (series == series_pair.download)
         {
-            series_type_name = "Download";
+            series_type_name = "下载";
             break;
         }
     }
@@ -420,7 +416,7 @@ void main_window::handle_series_hovered(const QPointF& point, bool state)
     {
         return;
     }
-    QString tooltip_text = QString("%1: %2 KB/s\nTime: %3")
+    QString tooltip_text = QString("%1: %2 KB/s\n时间: %3")
                                .arg(series_type_name)
                                .arg(point.y(), 0, 'f', 2)
                                .arg(QDateTime::fromMSecsSinceEpoch(static_cast<qint64>(point.x())).toString("hh:mm:ss"));
@@ -428,4 +424,51 @@ void main_window::handle_series_hovered(const QPointF& point, bool state)
     QPointF scene_pos = chart_->mapToPosition(point, series);
     tooltip_->setPos(scene_pos.x() + 10, scene_pos.y() - 30);
     tooltip_->show();
+}
+
+void main_window::closeEvent(QCloseEvent* event)
+{
+    if (tray_icon_->isVisible())
+    {
+        hide();
+        event->ignore();
+    }
+    else
+    {
+        event->accept();
+    }
+}
+
+void main_window::quit_application()
+{
+    LOG_INFO("quitting application via tray menu");
+    QApplication::quit();
+}
+
+void main_window::setup_tray_icon()
+{
+    tray_icon_ = new QSystemTrayIcon(this);
+    tray_menu_ = new QMenu(this);
+
+    show_hide_action_ = new QAction("显示/隐藏", this);
+    connect(show_hide_action_, &QAction::triggered, this, [this]() { isVisible() ? hide() : show(); });
+
+    quit_action_ = new QAction("退出", this);
+    connect(quit_action_, &QAction::triggered, this, &main_window::quit_application);
+
+    tray_menu_->addAction(show_hide_action_);
+    tray_menu_->addAction(quit_action_);
+
+    tray_icon_->setContextMenu(tray_menu_);
+    tray_icon_->setIcon(QApplication::windowIcon());
+    tray_icon_->setToolTip("网络速度监视器");
+    connect(tray_icon_, &QSystemTrayIcon::activated, this, &main_window::on_tray_icon_activated);
+}
+
+void main_window::on_tray_icon_activated(QSystemTrayIcon::ActivationReason reason)
+{
+    if (reason == QSystemTrayIcon::Trigger || reason == QSystemTrayIcon::DoubleClick)
+    {
+        isVisible() ? hide() : show();
+    }
 }
