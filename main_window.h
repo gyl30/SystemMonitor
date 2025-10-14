@@ -21,6 +21,8 @@
 #include "data_collector.h"
 #include "database_manager.h"
 #include "draggable_chart_view.h"
+#include "dns_collector.h"
+#include "dns_page.h"
 
 QT_USE_NAMESPACE
 
@@ -48,10 +50,20 @@ class main_window : public QMainWindow
     void request_snapshots_in_range(quint64 request_id, const QString& interface_name, const QDateTime& start, const QDateTime& end);
     void start_collector_timer(int interval_ms);
 
+    void request_add_dns_log(const dns_query_info& info);
+    void start_dns_capture();
+    void request_qps_stats_from_db(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs);
+    void request_top_domains_from_db(quint64 request_id, const QDateTime& start, const QDateTime& end);
+
    private slots:
     void handle_stats_collected(const QList<interface_stats>& stats, const QDateTime& timestamp);
     void handle_snapshots_loaded(quint64 request_id, const QString& interface_name, const QList<traffic_point>& snapshots);
     void handle_series_hovered(const QPointF& point, bool state);
+    void handle_dns_packet_collected(const dns_query_info& info);
+
+    void handle_dns_page_qps_request(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs);
+    void handle_dns_page_top_domains_request(quint64 request_id, const QDateTime& start, const QDateTime& end);
+
     void toggle_series_visibility(const QString& name);
     void snap_back_to_live_view();
     void process_new_interfaces();
@@ -76,13 +88,11 @@ class main_window : public QMainWindow
 
    private:
     QStackedWidget* central_stacked_widget_ = nullptr;
-    QWidget* dns_page_widget_ = nullptr;
-
+    dns_page* dns_page_ = nullptr;
     QToolBar* main_toolbar_ = nullptr;
     QAction* net_action_ = nullptr;
     QAction* dns_action_ = nullptr;
     QActionGroup* view_action_group_ = nullptr;
-
     QChart* chart_ = nullptr;
     draggable_chartview* chart_view_ = nullptr;
     QDateTimeAxis* axis_x_ = nullptr;
@@ -91,24 +101,20 @@ class main_window : public QMainWindow
     QList<QColor> color_palette_;
     int color_index_ = 0;
     QGraphicsSimpleTextItem* tooltip_ = nullptr;
-
     QDateTime first_timestamp_;
     QString isolated_interface_name_;
-
     QTimer* snap_back_timer_ = nullptr;
     bool is_manual_view_active_ = false;
-
     QStringList new_interfaces_queue_;
-
     QThread* data_collector_thread_ = nullptr;
     QThread* db_manager_thread_ = nullptr;
+    QThread* dns_collector_thread_ = nullptr;
     data_collector* data_collector_ = nullptr;
     database_manager* db_manager_ = nullptr;
-
+    dns_collector* dns_collector_ = nullptr;
     quint64 current_load_request_id_ = 0;
     qint64 pending_queries_count_ = 0;
     QDateTime loaded_data_start_time_;
-
     QSystemTrayIcon* tray_icon_ = nullptr;
     QMenu* tray_menu_ = nullptr;
     QAction* show_hide_action_ = nullptr;

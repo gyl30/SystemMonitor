@@ -4,7 +4,6 @@
 #include <QAction>
 #include <QApplication>
 #include <QMouseEvent>
-#include <QVBoxLayout>
 #include <QElapsedTimer>
 #include <QMessageBox>
 #include <QStackedWidget>
@@ -26,22 +25,17 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer
     setup_chart();
     setup_toolbar();
 
-    dns_page_widget_ = new QWidget(this);
-    auto* dns_layout = new QVBoxLayout(dns_page_widget_);
-    auto* dns_placeholder_label = new QLabel("DNS 功能页面正在开发中...", dns_page_widget_);
-    dns_placeholder_label->setAlignment(Qt::AlignCenter);
-    QFont font = dns_placeholder_label->font();
-    font.setPointSize(16);
-    dns_placeholder_label->setFont(font);
-    dns_layout->addWidget(dns_placeholder_label);
+    dns_page_ = new dns_page(this);
+    connect(dns_page_, &dns_page::request_qps_stats, this, &main_window::handle_dns_page_qps_request);
+    connect(dns_page_, &dns_page::request_top_domains, this, &main_window::handle_dns_page_top_domains_request);
 
     central_stacked_widget_ = new QStackedWidget(this);
     central_stacked_widget_->addWidget(chart_view_);
-    central_stacked_widget_->addWidget(dns_page_widget_);
+    central_stacked_widget_->addWidget(dns_page_);
 
     setCentralWidget(central_stacked_widget_);
-    setWindowTitle("网络速度监视器");
-    resize(800, 600);
+    setWindowTitle("网络与DNS监视器");
+    resize(1024, 768);
 
     setup_workers();
     setup_tray_icon();
@@ -71,6 +65,12 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer
 main_window::~main_window()
 {
     LOG_INFO("main window destructor called cleaning up threads");
+    if (dns_collector_thread_ != nullptr && dns_collector_thread_->isRunning())
+    {
+        dns_collector_thread_->requestInterruption();
+        dns_collector_thread_->quit();
+        dns_collector_thread_->wait(1000);
+    }
     if (data_collector_thread_ != nullptr && data_collector_thread_->isRunning())
     {
         data_collector_thread_->quit();
@@ -118,7 +118,7 @@ void main_window::on_view_changed(QAction* action)
     }
     else if (action == dns_action_)
     {
-        central_stacked_widget_->setCurrentWidget(dns_page_widget_);
+        central_stacked_widget_->setCurrentWidget(dns_page_);
         LOG_INFO("switched to DNS view");
     }
 }
@@ -126,25 +126,18 @@ void main_window::on_view_changed(QAction* action)
 void main_window::setup_workers()
 {
     db_manager_thread_ = new QThread(this);
-    data_collector_thread_ = new QThread(this);
-
-    QString db_path = QDir(QApplication::applicationDirPath()).filePath("network_speed.db");
+    QString db_path = QDir(QApplication::applicationDirPath()).filePath("network_monitor.db");
     db_manager_ = new database_manager(db_path);
-    data_collector_ = new data_collector();
-
     db_manager_->moveToThread(db_manager_thread_);
-    data_collector_->moveToThread(data_collector_thread_);
-
-    connect(data_collector_, &data_collector::stats_collected, this, &main_window::handle_stats_collected);
     connect(this, &main_window::request_add_snapshots, db_manager_, &database_manager::add_snapshots);
-
     connect(this, &main_window::request_snapshots_in_range, db_manager_, &database_manager::get_snapshots_in_range);
     connect(db_manager_, &database_manager::snapshots_ready, this, &main_window::handle_snapshots_loaded);
-
-    connect(this, &main_window::start_collector_timer, data_collector_, &data_collector::start_collection);
-
+    connect(this, &main_window::request_add_dns_log, db_manager_, &database_manager::add_dns_log);
+    connect(this, &main_window::request_qps_stats_from_db, db_manager_, &database_manager::get_qps_stats);
+    connect(this, &main_window::request_top_domains_from_db, db_manager_, &database_manager::get_top_domains);
+    connect(db_manager_, &database_manager::qps_stats_ready, dns_page_, &dns_page::handle_qps_stats_ready);
+    connect(db_manager_, &database_manager::top_domains_ready, dns_page_, &dns_page::handle_top_domains_ready);
     connect(db_manager_thread_, &QThread::started, db_manager_, &database_manager::initialize);
-
     connect(db_manager_,
             &database_manager::initialization_failed,
             this,
@@ -153,16 +146,48 @@ void main_window::setup_workers()
                 QMessageBox::critical(this, "database error", "failed to initialize the database the application will close.");
                 QApplication::quit();
             });
-
-    connect(data_collector_thread_, &QThread::finished, data_collector_, &QObject::deleteLater);
     connect(db_manager_thread_, &QThread::finished, db_manager_, &QObject::deleteLater);
+
+    data_collector_thread_ = new QThread(this);
+    data_collector_ = new data_collector();
+    data_collector_->moveToThread(data_collector_thread_);
+    connect(data_collector_, &data_collector::stats_collected, this, &main_window::handle_stats_collected);
+    connect(this, &main_window::start_collector_timer, data_collector_, &data_collector::start_collection);
+    connect(data_collector_thread_, &QThread::finished, data_collector_, &QObject::deleteLater);
+
+    dns_collector_thread_ = new QThread(this);
+    dns_collector_ = new dns_collector();
+    dns_collector_->moveToThread(dns_collector_thread_);
+    connect(this, &main_window::start_dns_capture, dns_collector_, &dns_collector::start_capture);
+    connect(dns_collector_, &dns_collector::dns_packet_collected, this, &main_window::handle_dns_packet_collected, Qt::QueuedConnection);
+    connect(dns_collector_thread_, &QThread::finished, dns_collector_, &QObject::deleteLater);
 
     db_manager_thread_->start();
     data_collector_thread_->start();
+    dns_collector_thread_->start();
 
     emit start_collector_timer(kCollectionIntervalMs);
+    emit start_dns_capture();
 
     LOG_INFO("worker threads started");
+}
+
+void main_window::handle_dns_packet_collected(const dns_query_info& info)
+{
+    LOG_DEBUG("received dns_packet_collected signal for {} forwarding to db manager", info.query_domain.toStdString());
+    emit request_add_dns_log(info);
+}
+
+void main_window::handle_dns_page_qps_request(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs)
+{
+    LOG_DEBUG("received request for qps stats from dns_page id {} forwarding to db manager", request_id);
+    emit request_qps_stats_from_db(request_id, start, end, interval_secs);
+}
+
+void main_window::handle_dns_page_top_domains_request(quint64 request_id, const QDateTime& start, const QDateTime& end)
+{
+    LOG_DEBUG("received request for top domains from dns_page id {} forwarding to db manager", request_id);
+    emit request_top_domains_from_db(request_id, start, end);
 }
 
 void main_window::handle_stats_collected(const QList<interface_stats>& stats, const QDateTime& timestamp)
@@ -565,6 +590,7 @@ void main_window::rescale_y_axis()
         axis_y_->setRange(0, new_max_y);
     }
 }
+
 void main_window::toggle_series_visibility(const QString& name)
 {
     if (isolated_interface_name_ == name)
@@ -578,6 +604,7 @@ void main_window::toggle_series_visibility(const QString& name)
     update_all_visuals();
     rescale_y_axis();
 }
+
 void main_window::update_all_visuals()
 {
     bool is_isolated_mode = !isolated_interface_name_.isEmpty();
@@ -610,6 +637,7 @@ void main_window::update_all_visuals()
         }
     }
 }
+
 void main_window::handle_series_hovered(const QPointF& point, bool state)
 {
     if (!state || tooltip_ == nullptr)

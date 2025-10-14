@@ -7,7 +7,7 @@
 #include "log.h"
 #include "database_manager.h"
 
-static QString connection_name() { return QString("traffic_connection_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId())); }
+static QString connection_name() { return QString("db_connection_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId())); }
 
 database_manager::database_manager(QString dbPath, QObject* parent) : QObject(parent), db_path_(std::move(dbPath)) {}
 
@@ -26,14 +26,14 @@ void database_manager::initialize()
     db_ = QSqlDatabase::addDatabase("QSQLITE", connection_name());
     db_.setDatabaseName(db_path_);
 
-    if (!open_database() || !create_table())
+    if (!open_database() || !create_tables())
     {
         LOG_ERROR("failed to initialize database aborting initialization");
         emit initialization_failed();
         return;
     }
 
-    prune_old_data(30);
+    prune_old_data(7);
 }
 
 bool database_manager::open_database()
@@ -47,7 +47,7 @@ bool database_manager::open_database()
     return true;
 }
 
-bool database_manager::create_table()
+bool database_manager::create_tables()
 {
     QSqlQuery query(db_);
     bool success = query.exec(
@@ -69,6 +69,30 @@ bool database_manager::create_table()
     {
         LOG_ERROR("create index on timestamp failed {}", query.lastError().text().toStdString());
     }
+
+    success = query.exec(
+        "CREATE TABLE IF NOT EXISTS dns_logs ("
+        "timestamp INTEGER NOT NULL, "
+        "transaction_id INTEGER NOT NULL, "
+        "direction INTEGER NOT NULL, "
+        "query_domain TEXT NOT NULL, "
+        "query_type TEXT NOT NULL, "
+        "response_code TEXT, "
+        "response_data TEXT, "
+        "resolver_ip TEXT NOT NULL"
+        ")");
+    if (!success)
+    {
+        LOG_ERROR("create table dns_logs failed {}", query.lastError().text().toStdString());
+        return false;
+    }
+
+    success = query.exec("CREATE INDEX IF NOT EXISTS idx_dns_log_time ON dns_logs (timestamp)");
+    if (!success)
+    {
+        LOG_ERROR("create index on dns_logs timestamp failed {}", query.lastError().text().toStdString());
+    }
+
     return success;
 }
 
@@ -107,6 +131,38 @@ void database_manager::add_snapshots(const QList<interface_stats>& stats_list, c
     }
 }
 
+void database_manager::add_dns_log(const dns_query_info& info)
+{
+    if (!db_.isOpen())
+    {
+        LOG_WARN("cannot add dns log database is not open");
+        return;
+    }
+
+    QSqlQuery query(db_);
+    query.prepare(
+        "INSERT INTO dns_logs (timestamp, transaction_id, direction, query_domain, query_type, response_code, response_data, resolver_ip) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)");
+
+    query.bindValue(0, info.timestamp.toMSecsSinceEpoch());
+    query.bindValue(1, info.transaction_id);
+    query.bindValue(2, static_cast<int>(info.direction));
+    query.bindValue(3, info.query_domain);
+    query.bindValue(4, info.query_type);
+    query.bindValue(5, info.response_code);
+    query.bindValue(6, info.response_data.join(", "));
+    query.bindValue(7, info.resolver_ip);
+
+    if (!query.exec())
+    {
+        LOG_ERROR("db add dns log failed for {} {}", info.query_domain.toStdString(), query.lastError().text().toStdString());
+    }
+    else
+    {
+        LOG_TRACE("successfully added dns log for {} to database", info.query_domain.toStdString());
+    }
+}
+
 void database_manager::get_snapshots_in_range(quint64 request_id, const QString& interface_name, const QDateTime& start, const QDateTime& end)
 {
     QList<traffic_point> results;
@@ -117,7 +173,6 @@ void database_manager::get_snapshots_in_range(quint64 request_id, const QString&
     }
 
     QSqlQuery query(db_);
-
     qint64 start_ts = start.toMSecsSinceEpoch();
     qint64 end_ts = end.toMSecsSinceEpoch();
 
@@ -156,7 +211,6 @@ void database_manager::get_snapshots_in_range(quint64 request_id, const QString&
             results.append({query.value(0).toLongLong(), query.value(1).toULongLong(), query.value(2).toULongLong()});
         }
     }
-
     emit snapshots_ready(request_id, interface_name, results);
 }
 
@@ -164,15 +218,112 @@ void database_manager::prune_old_data(int days_to_keep)
 {
     QDateTime cutoff = QDateTime::currentDateTime().addDays(-days_to_keep);
     QSqlQuery query(db_);
+
     query.prepare("DELETE FROM traffic_snapshots WHERE timestamp < ?");
     query.bindValue(0, cutoff.toMSecsSinceEpoch());
-
     if (!query.exec())
     {
-        LOG_ERROR("prune old data failed {}", query.lastError().text().toStdString());
+        LOG_ERROR("prune old traffic data failed {}", query.lastError().text().toStdString());
     }
     else
     {
-        LOG_INFO("pruned data older than {} days", days_to_keep);
+        LOG_INFO("pruned traffic data older than {} days", days_to_keep);
     }
+
+    query.prepare("DELETE FROM dns_logs WHERE timestamp < ?");
+    query.bindValue(0, cutoff.toMSecsSinceEpoch());
+    if (!query.exec())
+    {
+        LOG_ERROR("prune old dns data failed {}", query.lastError().text().toStdString());
+    }
+    else
+    {
+        LOG_INFO("pruned dns data older than {} days", days_to_keep);
+    }
+}
+
+void database_manager::get_qps_stats(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs)
+{
+    LOG_DEBUG("processing get_qps_stats request id {}", request_id);
+    QList<QPointF> results;
+    if (!db_.isOpen() || interval_secs <= 0)
+    {
+        LOG_WARN("cannot get qps stats db not open or interval invalid");
+        emit qps_stats_ready(request_id, results);
+        return;
+    }
+
+    qint64 interval_ms = interval_secs * 1000L;
+
+    QSqlQuery query(db_);
+    query.prepare(
+        "SELECT "
+        "  (timestamp / :interval_ms) * :interval_ms AS time_window, "
+        "  COUNT(*) "
+        "FROM dns_logs "
+        "WHERE timestamp BETWEEN :start_ts AND :end_ts AND direction = 0 "
+        "GROUP BY time_window "
+        "ORDER BY time_window");
+
+    query.bindValue(":interval_ms", interval_ms);
+    query.bindValue(":start_ts", start.toMSecsSinceEpoch());
+    query.bindValue(":end_ts", end.toMSecsSinceEpoch());
+
+    if (!query.exec())
+    {
+        LOG_ERROR("db get qps stats failed {}", query.lastError().text().toStdString());
+    }
+    else
+    {
+        while (query.next())
+        {
+            qreal timestamp = static_cast<qreal>(query.value(0).toLongLong());
+            qreal count = query.value(1).toInt();
+            results.append(QPointF(timestamp, count));
+        }
+    }
+
+    LOG_DEBUG("qps stats query finished for id {} found {} data points", request_id, results.size());
+    emit qps_stats_ready(request_id, results);
+}
+
+void database_manager::get_top_domains(quint64 request_id, const QDateTime& start, const QDateTime& end)
+{
+    LOG_DEBUG("top domains request id {}", request_id);
+    QList<QPair<QString, int>> results;
+    if (!db_.isOpen())
+    {
+        LOG_WARN("cannot get top domains db not open");
+        emit top_domains_ready(request_id, results);
+        return;
+    }
+
+    QSqlQuery query(db_);
+    query.prepare(
+        "SELECT "
+        "  query_domain, "
+        "  COUNT(*) as query_count "
+        "FROM dns_logs "
+        "WHERE timestamp BETWEEN :start_ts AND :end_ts AND direction = 0 "
+        "GROUP BY query_domain "
+        "ORDER BY query_count DESC "
+        "LIMIT 10");
+
+    query.bindValue(":start_ts", start.toMSecsSinceEpoch());
+    query.bindValue(":end_ts", end.toMSecsSinceEpoch());
+
+    if (!query.exec())
+    {
+        LOG_ERROR("db get top domains failed {}", query.lastError().text().toStdString());
+    }
+    else
+    {
+        while (query.next())
+        {
+            results.append({query.value(0).toString(), query.value(1).toInt()});
+        }
+    }
+
+    LOG_DEBUG("top domains query finished for id {} found {} domains", request_id, results.size());
+    emit top_domains_ready(request_id, results);
 }

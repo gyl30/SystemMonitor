@@ -72,7 +72,7 @@ if(CMAKE_CXX_COMPILER_ID MATCHES "GNU")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "Clang")
     message(STATUS "Clang detected, most hardening flags are compatible.")
 endif()
-# 4. 特定于CPU架构的控制流保护选项
+
 if(CMAKE_SYSTEM_PROCESSOR MATCHES "x86_64|AMD64")
     message(STATUS "x86_64 architecture detected, enabling Control-Flow Protection.")
     list(APPEND HARDENING_FLAGS_COMMON -fcf-protection=full)
@@ -95,6 +95,8 @@ set(CMAKE_AUTOUIC ON)
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network Charts Sql)
 find_package(PkgConfig REQUIRED)
 
+pkg_check_modules(PCAPPLUSPLUS REQUIRED IMPORTED_TARGET PcapPlusPlus)
+
 add_executable(system_monitor
     log.cpp
     main.cpp
@@ -103,6 +105,8 @@ add_executable(system_monitor
     data_collector.cpp
     database_manager.cpp
     draggable_chart_view.cpp
+    dns_page.cpp
+    dns_collector.cpp
 )
 
 target_compile_options(system_monitor PRIVATE
@@ -120,6 +124,7 @@ endif()
 
 target_include_directories(system_monitor PRIVATE
     third/spdlog/include
+    ${PCAPPLUSPLUS_INCLUDE_DIRS}
 )
 target_link_directories(system_monitor PRIVATE
 )
@@ -128,6 +133,8 @@ target_link_libraries(system_monitor PRIVATE
     Qt6::Network 
     Qt6::Charts
     Qt6::Sql
+    PkgConfig::PCAPPLUSPLUS
+    pthread
 )
 set_target_properties(system_monitor PROPERTIES
     WIN32_EXECUTABLE TRUE

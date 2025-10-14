@@ -4,8 +4,11 @@
 #include <QList>
 #include <QObject>
 #include <QDateTime>
+#include <QPointF>
+#include <QPair>
 #include <QtSql/QSqlDatabase>
 #include "network_info.h"
+#include "dns_query_info.h"
 
 struct traffic_point
 {
@@ -26,14 +29,21 @@ class database_manager : public QObject
     void initialize();
     void add_snapshots(const QList<interface_stats>& stats_list, const QDateTime& timestamp);
     void get_snapshots_in_range(quint64 request_id, const QString& interface_name, const QDateTime& start, const QDateTime& end);
+    void add_dns_log(const dns_query_info& info);
+
+    void get_qps_stats(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs);
+    void get_top_domains(quint64 request_id, const QDateTime& start, const QDateTime& end);
 
    signals:
     void snapshots_ready(quint64 request_id, const QString& interface_name, const QList<traffic_point>& data);
     void initialization_failed();
 
+    void qps_stats_ready(quint64 request_id, const QList<QPointF>& data);
+    void top_domains_ready(quint64 request_id, const QList<QPair<QString, int>>& data);
+
    private:
     bool open_database();
-    bool create_table();
+    bool create_tables();
     void prune_old_data(int days_to_keep);
 
     QString db_path_;
