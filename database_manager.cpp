@@ -33,7 +33,9 @@ void database_manager::initialize()
         return;
     }
 
-    prune_old_data(7);
+    prune_old_data(30);
+    LOG_INFO("database is ready.");
+    emit database_ready();
 }
 
 bool database_manager::open_database()

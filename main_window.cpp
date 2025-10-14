@@ -15,6 +15,7 @@
 #include "log.h"
 #include "main_window.h"
 
+static constexpr int kMaxDataGapSeconds = 5;
 static constexpr int kDataBufferFactor = 2;
 static constexpr int kVisibleWindowMinutes = 15L;
 static constexpr int kSnapBackTimeoutMs = 5000;
@@ -28,6 +29,7 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer
     dns_page_ = new dns_page(this);
     connect(dns_page_, &dns_page::request_qps_stats, this, &main_window::handle_dns_page_qps_request);
     connect(dns_page_, &dns_page::request_top_domains, this, &main_window::handle_dns_page_top_domains_request);
+    connect(this, &main_window::initial_data_load_requested, dns_page_, &dns_page::trigger_initial_load);
 
     central_stacked_widget_ = new QStackedWidget(this);
     central_stacked_widget_->addWidget(chart_view_);
@@ -146,6 +148,7 @@ void main_window::setup_workers()
                 QMessageBox::critical(this, "database error", "failed to initialize the database the application will close.");
                 QApplication::quit();
             });
+    connect(db_manager_, &database_manager::database_ready, this, &main_window::on_database_ready, Qt::QueuedConnection);
     connect(db_manager_thread_, &QThread::finished, db_manager_, &QObject::deleteLater);
 
     data_collector_thread_ = new QThread(this);
@@ -171,7 +174,11 @@ void main_window::setup_workers()
 
     LOG_INFO("worker threads started");
 }
-
+void main_window::on_database_ready()
+{
+    LOG_INFO("received database_ready signal requesting initial data load");
+    emit initial_data_load_requested();
+}
 void main_window::handle_dns_packet_collected(const dns_query_info& info)
 {
     LOG_DEBUG("received dns_packet_collected signal for {} forwarding to db manager", info.query_domain.toStdString());
@@ -477,23 +484,27 @@ void main_window::handle_snapshots_loaded(quint64 request_id, const QString& int
     QVector<QPointF> download_points;
     if (sorted_snapshots.size() >= 2)
     {
-        QDateTime series_start_time = QDateTime::fromMSecsSinceEpoch(sorted_snapshots[1].timestamp_ms);
-        if (series_start_time < loaded_data_start_time_)
-        {
-            loaded_data_start_time_ = series_start_time;
-        }
         if (!first_timestamp_.isValid())
         {
-            first_timestamp_ = series_start_time;
+            first_timestamp_ = QDateTime::fromMSecsSinceEpoch(sorted_snapshots[1].timestamp_ms);
         }
 
-        upload_points.reserve(sorted_snapshots.size() - 1);
-        download_points.reserve(sorted_snapshots.size() - 1);
+        upload_points.reserve(sorted_snapshots.size() * 2);
+        download_points.reserve(sorted_snapshots.size() * 2);
+
         for (int i = 1; i < sorted_snapshots.size(); ++i)
         {
             const auto& current = sorted_snapshots[i];
             const auto& previous = sorted_snapshots[i - 1];
             double interval_seconds = static_cast<double>(current.timestamp_ms - previous.timestamp_ms) / 1000.0;
+
+            if (interval_seconds > kMaxDataGapSeconds)
+            {
+                upload_points.append(QPointF(static_cast<double>(previous.timestamp_ms + 1), 0.0));
+                download_points.append(QPointF(static_cast<double>(previous.timestamp_ms + 1), 0.0));
+                upload_points.append(QPointF(static_cast<double>(current.timestamp_ms - 1), 0.0));
+                download_points.append(QPointF(static_cast<double>(current.timestamp_ms - 1), 0.0));
+            }
             if (interval_seconds <= 0)
             {
                 continue;

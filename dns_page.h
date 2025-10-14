@@ -32,6 +32,7 @@ class dns_page : public QWidget
    public slots:
     void handle_qps_stats_ready(quint64 request_id, const QList<QPointF>& data);
     void handle_top_domains_ready(quint64 request_id, const QList<QPair<QString, int>>& data);
+    void trigger_initial_load();
 
    private slots:
     void on_refresh_timer_timeout();

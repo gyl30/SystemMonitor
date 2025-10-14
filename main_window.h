@@ -46,6 +46,7 @@ class main_window : public QMainWindow
     void closeEvent(QCloseEvent* event) override;
 
    signals:
+    void initial_data_load_requested();
     void request_add_snapshots(const QList<interface_stats>& stats_list, const QDateTime& timestamp);
     void request_snapshots_in_range(quint64 request_id, const QString& interface_name, const QDateTime& start, const QDateTime& end);
     void start_collector_timer(int interval_ms);
@@ -72,6 +73,7 @@ class main_window : public QMainWindow
     void on_tray_icon_activated(QSystemTrayIcon::ActivationReason reason);
     void quit_application();
     void on_view_changed(QAction* action);
+    void on_database_ready();
 
    private:
     void setup_chart();

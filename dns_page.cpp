@@ -29,7 +29,6 @@ dns_page::dns_page(QWidget* parent) : QWidget(parent)
 
     refresh_timer_ = new QTimer(this);
     connect(refresh_timer_, &QTimer::timeout, this, &dns_page::on_refresh_timer_timeout);
-    refresh_timer_->start(kRefreshIntervalSecs * 1000);
 
     snap_back_timer_ = new QTimer(this);
     snap_back_timer_->setSingleShot(true);
@@ -40,7 +39,15 @@ dns_page::dns_page(QWidget* parent) : QWidget(parent)
 
     request_data_for_current_view();
 }
-
+void dns_page::trigger_initial_load()
+{
+    LOG_INFO("initial load triggered");
+    if (!refresh_timer_->isActive())
+    {
+        on_refresh_timer_timeout();
+        refresh_timer_->start(kRefreshIntervalSecs * 1000);
+    }
+}
 void dns_page::setup_ui()
 {
     chart_view_ = new draggable_chartview(chart_, this);

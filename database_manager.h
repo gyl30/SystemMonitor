@@ -37,6 +37,7 @@ class database_manager : public QObject
    signals:
     void snapshots_ready(quint64 request_id, const QString& interface_name, const QList<traffic_point>& data);
     void initialization_failed();
+    void database_ready();
 
     void qps_stats_ready(quint64 request_id, const QList<QPointF>& data);
     void top_domains_ready(quint64 request_id, const QList<QPair<QString, int>>& data);
