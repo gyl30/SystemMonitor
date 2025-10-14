@@ -20,7 +20,27 @@ static constexpr int kDataBufferFactor = 2;
 static constexpr int kVisibleWindowMinutes = 15L;
 static constexpr int kSnapBackTimeoutMs = 5000;
 static constexpr int kCollectionIntervalMs = 1000;
+static QPair<double, double> calculate_traffic_speeds(qint64 prev_timestamp_ms,
+                                                      quint64 prev_bytes_sent,
+                                                      quint64 prev_bytes_received,
+                                                      qint64 curr_timestamp_ms,
+                                                      quint64 curr_bytes_sent,
+                                                      quint64 curr_bytes_received)
+{
+    double interval_seconds = static_cast<double>(curr_timestamp_ms - prev_timestamp_ms) / 1000.0;
+    if (interval_seconds <= 0)
+    {
+        return {0.0, 0.0};
+    }
 
+    quint64 sent_diff = (curr_bytes_sent >= prev_bytes_sent) ? (curr_bytes_sent - prev_bytes_sent) : curr_bytes_sent;
+    quint64 recv_diff = (curr_bytes_received >= prev_bytes_received) ? (curr_bytes_received - prev_bytes_received) : curr_bytes_received;
+
+    double upload_speed_kb = (static_cast<double>(sent_diff) / interval_seconds) / 1024.0;
+    double download_speed_kb = (static_cast<double>(recv_diff) / interval_seconds) / 1024.0;
+
+    return {upload_speed_kb, download_speed_kb};
+}
 main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer_(new QTimer(this))
 {
     setup_chart();
@@ -47,8 +67,8 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer
     connect(snap_back_timer_, &QTimer::timeout, this, &main_window::snap_back_to_live_view);
 
     LOG_INFO("connecting to draggable chartview signals");
-    connect(chart_view_, &draggable_chartview::interaction_started, this, &main_window::onInteractionStarted);
-    connect(chart_view_, &draggable_chartview::view_changed_by_drag, this, &main_window::onInteractionFinished);
+    connect(chart_view_, &draggable_chartview::interaction_started, this, &main_window::on_interaction_started);
+    connect(chart_view_, &draggable_chartview::view_changed_by_drag, this, &main_window::on_interaction_finished);
 
     color_palette_ << Qt::blue << Qt::red << Qt::green << Qt::magenta << Qt::cyan << Qt::yellow;
 
@@ -267,20 +287,15 @@ void main_window::append_live_data_point(const interface_stats& current_stats, c
         return;
     }
 
-    double interval_seconds = static_cast<double>(timestamp.toMSecsSinceEpoch() - previous_stats.timestamp.toMSecsSinceEpoch()) / 1000.0;
-    if (interval_seconds <= 0)
-    {
-        return;
-    }
+    QPair<double, double> speeds = calculate_traffic_speeds(previous_stats.timestamp.toMSecsSinceEpoch(),
+                                                            previous_stats.bytes_sent,
+                                                            previous_stats.bytes_received,
+                                                            timestamp.toMSecsSinceEpoch(),
+                                                            current_stats.bytes_sent,
+                                                            current_stats.bytes_received);
 
-    quint64 sent_diff =
-        (current_stats.bytes_sent >= previous_stats.bytes_sent) ? (current_stats.bytes_sent - previous_stats.bytes_sent) : current_stats.bytes_sent;
-    quint64 recv_diff = (current_stats.bytes_received >= previous_stats.bytes_received)
-                            ? (current_stats.bytes_received - previous_stats.bytes_received)
-                            : current_stats.bytes_received;
-
-    double upload_speed_kb = (static_cast<double>(sent_diff) / interval_seconds) / 1024.0;
-    double download_speed_kb = (static_cast<double>(recv_diff) / interval_seconds) / 1024.0;
+    double upload_speed_kb = speeds.first;
+    double download_speed_kb = speeds.second;
 
     series_pair.upload->append(static_cast<double>(timestamp.toMSecsSinceEpoch()), upload_speed_kb);
     series_pair.download->append(static_cast<double>(timestamp.toMSecsSinceEpoch()), download_speed_kb);
@@ -318,7 +333,7 @@ void main_window::process_new_interfaces()
     load_data_for_display(start_time, now);
 }
 
-void main_window::onInteractionStarted()
+void main_window::on_interaction_started()
 {
     LOG_INFO("interaction started pausing live updates");
     if (!is_manual_view_active_)
@@ -329,7 +344,7 @@ void main_window::onInteractionStarted()
     snap_back_timer_->start(kSnapBackTimeoutMs);
 }
 
-void main_window::onInteractionFinished()
+void main_window::on_interaction_finished()
 {
     LOG_INFO("interaction finished loading data for the new view range");
     load_data_for_display(axis_x_->min(), axis_x_->max());
@@ -510,14 +525,14 @@ void main_window::handle_snapshots_loaded(quint64 request_id, const QString& int
                 continue;
             }
 
-            quint64 sent_diff = (current.bytes_sent >= previous.bytes_sent) ? (current.bytes_sent - previous.bytes_sent) : current.bytes_sent;
-            quint64 recv_diff =
-                (current.bytes_received >= previous.bytes_received) ? (current.bytes_received - previous.bytes_received) : current.bytes_received;
-
-            double upload_speed_kb = (static_cast<double>(sent_diff) / interval_seconds) / 1024.0;
-            double download_speed_kb = (static_cast<double>(recv_diff) / interval_seconds) / 1024.0;
-            upload_points.append(QPointF(static_cast<double>(current.timestamp_ms), upload_speed_kb));
-            download_points.append(QPointF(static_cast<double>(current.timestamp_ms), download_speed_kb));
+            QPair<double, double> speeds = calculate_traffic_speeds(previous.timestamp_ms,
+                                                                    previous.bytes_sent,
+                                                                    previous.bytes_received,
+                                                                    current.timestamp_ms,
+                                                                    current.bytes_sent,
+                                                                    current.bytes_received);
+            upload_points.append(QPointF(static_cast<double>(current.timestamp_ms), speeds.first));
+            download_points.append(QPointF(static_cast<double>(current.timestamp_ms), speeds.second));
         }
 
         const auto& last_snapshot = sorted_snapshots.last();

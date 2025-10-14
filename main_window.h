@@ -68,8 +68,8 @@ class main_window : public QMainWindow
     void toggle_series_visibility(const QString& name);
     void snap_back_to_live_view();
     void process_new_interfaces();
-    void onInteractionStarted();
-    void onInteractionFinished();
+    void on_interaction_started();
+    void on_interaction_finished();
     void on_tray_icon_activated(QSystemTrayIcon::ActivationReason reason);
     void quit_application();
     void on_view_changed(QAction* action);
