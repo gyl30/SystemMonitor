@@ -4,8 +4,12 @@
 #include <QAction>
 #include <QApplication>
 #include <QMouseEvent>
+#include <QVBoxLayout>
 #include <QElapsedTimer>
 #include <QMessageBox>
+#include <QStackedWidget>
+#include <QToolBar>
+#include <QLabel>
 
 #include <algorithm>
 
@@ -20,7 +24,22 @@ static constexpr int kCollectionIntervalMs = 1000;
 main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer_(new QTimer(this))
 {
     setup_chart();
-    setCentralWidget(chart_view_);
+    setup_toolbar();
+
+    dns_page_widget_ = new QWidget(this);
+    auto* dns_layout = new QVBoxLayout(dns_page_widget_);
+    auto* dns_placeholder_label = new QLabel("DNS 功能页面正在开发中...", dns_page_widget_);
+    dns_placeholder_label->setAlignment(Qt::AlignCenter);
+    QFont font = dns_placeholder_label->font();
+    font.setPointSize(16);
+    dns_placeholder_label->setFont(font);
+    dns_layout->addWidget(dns_placeholder_label);
+
+    central_stacked_widget_ = new QStackedWidget(this);
+    central_stacked_widget_->addWidget(chart_view_);
+    central_stacked_widget_->addWidget(dns_page_widget_);
+
+    setCentralWidget(central_stacked_widget_);
     setWindowTitle("网络速度监视器");
     resize(800, 600);
 
@@ -63,6 +82,45 @@ main_window::~main_window()
         db_manager_thread_->wait(1000);
     }
     LOG_INFO("threads cleanup finished");
+}
+
+void main_window::setup_toolbar()
+{
+    main_toolbar_ = new QToolBar(this);
+    main_toolbar_->setMovable(false);
+
+    net_action_ = new QAction("NET", this);
+    net_action_->setCheckable(true);
+
+    dns_action_ = new QAction("DNS", this);
+    dns_action_->setCheckable(true);
+
+    view_action_group_ = new QActionGroup(this);
+    view_action_group_->addAction(net_action_);
+    view_action_group_->addAction(dns_action_);
+
+    net_action_->setChecked(true);
+
+    main_toolbar_->addAction(net_action_);
+    main_toolbar_->addAction(dns_action_);
+
+    addToolBar(main_toolbar_);
+
+    connect(view_action_group_, &QActionGroup::triggered, this, &main_window::on_view_changed);
+}
+
+void main_window::on_view_changed(QAction* action)
+{
+    if (action == net_action_)
+    {
+        central_stacked_widget_->setCurrentWidget(chart_view_);
+        LOG_INFO("switched to NET view");
+    }
+    else if (action == dns_action_)
+    {
+        central_stacked_widget_->setCurrentWidget(dns_page_widget_);
+        LOG_INFO("switched to DNS view");
+    }
 }
 
 void main_window::setup_workers()

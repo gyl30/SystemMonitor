@@ -8,6 +8,9 @@
 #include <QMainWindow>
 #include <QCloseEvent>
 #include <QSystemTrayIcon>
+#include <QStackedWidget>
+#include <QToolBar>
+#include <QActionGroup>
 #include <QGraphicsSimpleTextItem>
 
 #include <QtCharts/QLineSeries>
@@ -56,9 +59,11 @@ class main_window : public QMainWindow
     void onInteractionFinished();
     void on_tray_icon_activated(QSystemTrayIcon::ActivationReason reason);
     void quit_application();
+    void on_view_changed(QAction* action);
 
    private:
     void setup_chart();
+    void setup_toolbar();
     void setup_workers();
     void add_series_for_interface(const QString& interface_name);
     void update_x_axis(const QDateTime& start, const QDateTime& end);
@@ -70,17 +75,23 @@ class main_window : public QMainWindow
     void append_live_data_point(const interface_stats& current_stats, const QDateTime& timestamp);
 
    private:
+    QStackedWidget* central_stacked_widget_ = nullptr;
+    QWidget* dns_page_widget_ = nullptr;
+
+    QToolBar* main_toolbar_ = nullptr;
+    QAction* net_action_ = nullptr;
+    QAction* dns_action_ = nullptr;
+    QActionGroup* view_action_group_ = nullptr;
+
     QChart* chart_ = nullptr;
     draggable_chartview* chart_view_ = nullptr;
-
     QDateTimeAxis* axis_x_ = nullptr;
     QValueAxis* axis_y_ = nullptr;
-
     QMap<QString, interface_series> series_map_;
     QList<QColor> color_palette_;
     int color_index_ = 0;
-
     QGraphicsSimpleTextItem* tooltip_ = nullptr;
+
     QDateTime first_timestamp_;
     QString isolated_interface_name_;
 
