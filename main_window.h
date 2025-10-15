@@ -54,7 +54,8 @@ class main_window : public QMainWindow
     void request_add_dns_log(const dns_query_info& info);
     void start_dns_capture();
     void request_qps_stats_from_db(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs);
-    void request_top_domains_from_db(quint64 request_id, const QDateTime& start, const QDateTime& end);
+    void request_all_domains_from_db(quint64 request_id, const QDateTime& start, const QDateTime& end);
+    void request_dns_details_from_db(quint64 request_id, const QString& domain, const QDateTime& start, const QDateTime& end);
 
    private slots:
     void handle_stats_collected(const QList<interface_stats>& stats, const QDateTime& timestamp);
@@ -63,7 +64,8 @@ class main_window : public QMainWindow
     void handle_dns_packet_collected(const dns_query_info& info);
 
     void handle_dns_page_qps_request(quint64 request_id, const QDateTime& start, const QDateTime& end, int interval_secs);
-    void handle_dns_page_top_domains_request(quint64 request_id, const QDateTime& start, const QDateTime& end);
+    void handle_dns_page_all_domains_request(quint64 request_id, const QDateTime& start, const QDateTime& end);
+    void handle_dns_page_details_request(quint64 request_id, const QString& domain, const QDateTime& start, const QDateTime& end);
 
     void toggle_series_visibility(const QString& name);
     void snap_back_to_live_view();

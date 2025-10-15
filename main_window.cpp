@@ -48,7 +48,8 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer
 
     dns_page_ = new dns_page(this);
     connect(dns_page_, &dns_page::request_qps_stats, this, &main_window::handle_dns_page_qps_request);
-    connect(dns_page_, &dns_page::request_top_domains, this, &main_window::handle_dns_page_top_domains_request);
+    connect(dns_page_, &dns_page::request_all_domains, this, &main_window::handle_dns_page_all_domains_request);
+    connect(dns_page_, &dns_page::request_dns_details_for_domain, this, &main_window::handle_dns_page_details_request);
     connect(this, &main_window::initial_data_load_requested, dns_page_, &dns_page::trigger_initial_load);
 
     central_stacked_widget_ = new QStackedWidget(this);
@@ -156,9 +157,11 @@ void main_window::setup_workers()
     connect(db_manager_, &database_manager::snapshots_ready, this, &main_window::handle_snapshots_loaded);
     connect(this, &main_window::request_add_dns_log, db_manager_, &database_manager::add_dns_log);
     connect(this, &main_window::request_qps_stats_from_db, db_manager_, &database_manager::get_qps_stats);
-    connect(this, &main_window::request_top_domains_from_db, db_manager_, &database_manager::get_top_domains);
+    connect(this, &main_window::request_all_domains_from_db, db_manager_, &database_manager::get_all_domains);
+    connect(this, &main_window::request_dns_details_from_db, db_manager_, &database_manager::get_dns_details_for_domain);
     connect(db_manager_, &database_manager::qps_stats_ready, dns_page_, &dns_page::handle_qps_stats_ready);
-    connect(db_manager_, &database_manager::top_domains_ready, dns_page_, &dns_page::handle_top_domains_ready);
+    connect(db_manager_, &database_manager::all_domains_ready, dns_page_, &dns_page::handle_all_domains_ready);
+    connect(db_manager_, &database_manager::dns_details_ready, dns_page_, &dns_page::handle_dns_details_ready);
     connect(db_manager_thread_, &QThread::started, db_manager_, &database_manager::initialize);
     connect(db_manager_,
             &database_manager::initialization_failed,
@@ -211,10 +214,16 @@ void main_window::handle_dns_page_qps_request(quint64 request_id, const QDateTim
     emit request_qps_stats_from_db(request_id, start, end, interval_secs);
 }
 
-void main_window::handle_dns_page_top_domains_request(quint64 request_id, const QDateTime& start, const QDateTime& end)
+void main_window::handle_dns_page_all_domains_request(quint64 request_id, const QDateTime& start, const QDateTime& end)
 {
-    LOG_DEBUG("received request for top domains from dns_page id {} forwarding to db manager", request_id);
-    emit request_top_domains_from_db(request_id, start, end);
+    LOG_DEBUG("received request for all domains from dns_page id {} forwarding to db manager", request_id);
+    emit request_all_domains_from_db(request_id, start, end);
+}
+
+void main_window::handle_dns_page_details_request(quint64 request_id, const QString& domain, const QDateTime& start, const QDateTime& end)
+{
+    LOG_DEBUG("received request for dns details for {} from dns_page id {} forwarding to db manager", domain.toStdString(), request_id);
+    emit request_dns_details_from_db(request_id, domain, start, end);
 }
 
 void main_window::handle_stats_collected(const QList<interface_stats>& stats, const QDateTime& timestamp)

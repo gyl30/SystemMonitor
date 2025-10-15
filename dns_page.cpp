@@ -37,6 +37,8 @@ dns_page::dns_page(QWidget* parent) : QWidget(parent)
     connect(chart_view_, &draggable_chartview::interaction_started, this, &dns_page::on_interaction_started);
     connect(chart_view_, &draggable_chartview::view_changed_by_drag, this, &dns_page::on_interaction_finished);
 
+    connect(all_domains_view_->selectionModel(), &QItemSelectionModel::currentRowChanged, this, &dns_page::on_domain_selected);
+
     request_data_for_current_view();
 }
 void dns_page::trigger_initial_load()
@@ -53,20 +55,36 @@ void dns_page::setup_ui()
     chart_view_ = new draggable_chartview(chart_, this);
     chart_view_->setRenderHint(QPainter::Antialiasing);
 
-    top_domains_model_ = new QStandardItemModel(0, 2, this);
-    top_domains_model_->setHorizontalHeaderLabels({"域名", "查询次数"});
+    splitter_ = new QSplitter(Qt::Horizontal, this);
 
-    top_domains_table_view_ = new QTableView(this);
-    top_domains_table_view_->setModel(top_domains_model_);
-    top_domains_table_view_->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    top_domains_table_view_->verticalHeader()->hide();
-    top_domains_table_view_->horizontalHeader()->setStretchLastSection(true);
-    top_domains_table_view_->setSelectionBehavior(QAbstractItemView::SelectRows);
-    top_domains_table_view_->setSortingEnabled(true);
+    all_domains_model_ = new QStandardItemModel(0, 1, this);
+    all_domains_model_->setHorizontalHeaderLabels({"域名"});
+    all_domains_view_ = new QTableView(this);
+    all_domains_view_->setModel(all_domains_model_);
+    all_domains_view_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    all_domains_view_->verticalHeader()->hide();
+    all_domains_view_->horizontalHeader()->setStretchLastSection(true);
+    all_domains_view_->setSelectionBehavior(QAbstractItemView::SelectRows);
+    all_domains_view_->setSelectionMode(QAbstractItemView::SingleSelection);
+    all_domains_view_->setSortingEnabled(true);
+
+    domain_details_model_ = new QStandardItemModel(0, 6, this);
+    domain_details_model_->setHorizontalHeaderLabels({"时间", "方向", "类型", "响应码", "响应数据", "解析器 IP"});
+    domain_details_view_ = new QTableView(this);
+    domain_details_view_->setModel(domain_details_model_);
+    domain_details_view_->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    domain_details_view_->verticalHeader()->hide();
+    domain_details_view_->setSelectionBehavior(QAbstractItemView::SelectRows);
+
+    domain_details_view_->horizontalHeader()->setStretchLastSection(true);
+
+    splitter_->addWidget(all_domains_view_);
+    splitter_->addWidget(domain_details_view_);
+    splitter_->setSizes({300, 700});
 
     auto* main_layout = new QVBoxLayout(this);
     main_layout->addWidget(chart_view_, 3);
-    main_layout->addWidget(top_domains_table_view_, 1);
+    main_layout->addWidget(splitter_, 2);
     setLayout(main_layout);
 }
 
@@ -131,10 +149,7 @@ void dns_page::request_data_for_current_view()
     }
 
     emit request_qps_stats(current_request_id_, start_time, end_time, kChartIntervalSecs);
-
-    const QDateTime top_domains_end = QDateTime::currentDateTime();
-    const QDateTime top_domains_start = top_domains_end.addSecs(-kHistoryDurationSecs);
-    emit request_top_domains(current_request_id_, top_domains_start, top_domains_end);
+    emit request_all_domains(current_request_id_, start_time, end_time);
 }
 
 void dns_page::handle_qps_stats_ready(quint64 request_id, const QList<QPointF>& data)
@@ -194,14 +209,84 @@ void dns_page::handle_qps_stats_ready(quint64 request_id, const QList<QPointF>& 
     }
 }
 
-void dns_page::handle_top_domains_ready(quint64 request_id, const QList<QPair<QString, int>>& data)
+void dns_page::handle_all_domains_ready(quint64 request_id, const QStringList& domains)
 {
     if (request_id != current_request_id_)
     {
         return;
     }
-    LOG_DEBUG("received top domains ready for id {} domains found {}", request_id, data.size());
-    update_top_domains_table(data);
+    LOG_DEBUG("received all domains ready for id {} domains found {}", request_id, domains.size());
+
+    QString previously_selected_domain;
+    if (all_domains_view_->selectionModel()->hasSelection())
+    {
+        previously_selected_domain = all_domains_view_->selectionModel()->currentIndex().data().toString();
+    }
+
+    all_domains_model_->removeRows(0, all_domains_model_->rowCount());
+    if (previously_selected_domain.isEmpty())
+    {
+        domain_details_model_->removeRows(0, domain_details_model_->rowCount());
+    }
+
+    for (const QString& domain : domains)
+    {
+        all_domains_model_->appendRow(new QStandardItem(domain));
+    }
+
+    if (!previously_selected_domain.isEmpty())
+    {
+        QModelIndexList matches = all_domains_model_->match(
+            all_domains_model_->index(0, 0), Qt::DisplayRole, QVariant::fromValue(previously_selected_domain), 1, Qt::MatchExactly);
+        if (!matches.isEmpty())
+        {
+            all_domains_view_->setCurrentIndex(matches.first());
+        }
+        else
+        {
+            domain_details_model_->removeRows(0, domain_details_model_->rowCount());
+        }
+    }
+}
+
+void dns_page::handle_dns_details_ready(quint64 request_id, const QList<dns_query_info>& details)
+{
+    if (request_id != current_details_request_id_)
+    {
+        return;
+    }
+    LOG_DEBUG("received dns details ready for id {} records found {}", request_id, details.size());
+    domain_details_model_->removeRows(0, domain_details_model_->rowCount());
+    domain_details_view_->clearSpans();
+
+    for (int i = 0; i < details.size(); ++i)
+    {
+        const auto& info = details[i];
+        QList<QStandardItem*> row_items;
+        row_items.append(new QStandardItem(info.timestamp.toString("yyyy-MM-dd hh:mm:ss.zzz")));
+
+        bool is_request = (info.direction == dns_query_info::packet_direction::kRequest);
+        row_items.append(new QStandardItem(is_request ? "请求" : "响应"));
+        row_items.append(new QStandardItem(info.query_type));
+
+        if (is_request)
+        {
+            auto* placeholder_item = new QStandardItem("—");
+            placeholder_item->setTextAlignment(Qt::AlignCenter);
+            row_items.append(placeholder_item);
+            row_items.append(new QStandardItem());
+            domain_details_model_->appendRow(row_items);
+            domain_details_view_->setSpan(i, 3, 1, 2);
+        }
+        else
+        {
+            row_items.append(new QStandardItem(info.response_code));
+            row_items.append(new QStandardItem(info.response_data.join(", ")));
+            domain_details_model_->appendRow(row_items);
+        }
+
+        domain_details_model_->setItem(i, 5, new QStandardItem(info.resolver_ip));
+    }
 }
 
 void dns_page::handle_series_hovered(const QPointF& point, bool state)
@@ -234,20 +319,6 @@ void dns_page::update_chart_axes(const QDateTime& start, const QDateTime& end)
     axis_y_->setMax(qMax(10.0, max_y * 1.2));
 }
 
-void dns_page::update_top_domains_table(const QList<QPair<QString, int>>& data)
-{
-    top_domains_model_->removeRows(0, top_domains_model_->rowCount());
-    top_domains_model_->setRowCount(static_cast<int>(data.size()));
-
-    for (int i = 0; i < data.size(); ++i)
-    {
-        top_domains_model_->setItem(i, 0, new QStandardItem(data[i].first));
-        auto* countItem = new QStandardItem(QString::number(data[i].second));
-        countItem->setTextAlignment(Qt::AlignRight | Qt::AlignVCenter);
-        top_domains_model_->setItem(i, 1, countItem);
-    }
-}
-
 void dns_page::on_interaction_started()
 {
     if (!is_manual_view_active_)
@@ -272,4 +343,33 @@ void dns_page::snap_back_to_live_view()
     is_manual_view_active_ = false;
     chart_->setTitle("DNS 查询率");
     request_data_for_current_view();
+}
+
+void dns_page::on_domain_selected(const QModelIndex& current, const QModelIndex& previous)
+{
+    (void)previous;
+    if (!current.isValid())
+    {
+        domain_details_model_->removeRows(0, domain_details_model_->rowCount());
+        return;
+    }
+    QString domain = all_domains_model_->data(current).toString();
+    current_details_request_id_++;
+    LOG_DEBUG("requesting details for domain {} with id {}", domain.toStdString(), current_details_request_id_);
+
+    QDateTime start_time;
+    QDateTime end_time;
+
+    if (is_manual_view_active_)
+    {
+        start_time = axis_x_->min();
+        end_time = axis_x_->max();
+    }
+    else
+    {
+        end_time = QDateTime::currentDateTime();
+        start_time = end_time.addSecs(-kHistoryDurationSecs);
+    }
+
+    emit request_dns_details_for_domain(current_details_request_id_, domain, start_time, end_time);
 }

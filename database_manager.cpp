@@ -9,7 +9,7 @@
 
 static QString connection_name() { return QString("db_connection_%1").arg(reinterpret_cast<quintptr>(QThread::currentThreadId())); }
 
-database_manager::database_manager(QString dbPath, QObject* parent) : QObject(parent), db_path_(std::move(dbPath)) {}
+database_manager::database_manager(QString db_path, QObject* parent) : QObject(parent), db_path_(std::move(db_path)) {}
 
 database_manager::~database_manager()
 {
@@ -289,43 +289,85 @@ void database_manager::get_qps_stats(quint64 request_id, const QDateTime& start,
     emit qps_stats_ready(request_id, results);
 }
 
-void database_manager::get_top_domains(quint64 request_id, const QDateTime& start, const QDateTime& end)
+void database_manager::get_all_domains(quint64 request_id, const QDateTime& start, const QDateTime& end)
 {
-    LOG_DEBUG("top domains request id {}", request_id);
-    QList<QPair<QString, int>> results;
+    LOG_DEBUG("all domains request id {}", request_id);
+    QStringList results;
     if (!db_.isOpen())
     {
-        LOG_WARN("cannot get top domains db not open");
-        emit top_domains_ready(request_id, results);
+        LOG_WARN("cannot get all domains db not open");
+        emit all_domains_ready(request_id, results);
         return;
     }
 
     QSqlQuery query(db_);
     query.prepare(
-        "SELECT "
-        "  query_domain, "
-        "  COUNT(*) as query_count "
+        "SELECT DISTINCT query_domain "
         "FROM dns_logs "
-        "WHERE timestamp BETWEEN :start_ts AND :end_ts AND direction = 0 "
-        "GROUP BY query_domain "
-        "ORDER BY query_count DESC "
-        "LIMIT 10");
+        "WHERE timestamp BETWEEN :start_ts AND :end_ts "
+        "ORDER BY query_domain ASC");
 
     query.bindValue(":start_ts", start.toMSecsSinceEpoch());
     query.bindValue(":end_ts", end.toMSecsSinceEpoch());
 
     if (!query.exec())
     {
-        LOG_ERROR("db get top domains failed {}", query.lastError().text().toStdString());
+        LOG_ERROR("db get all domains failed {}", query.lastError().text().toStdString());
     }
     else
     {
         while (query.next())
         {
-            results.append({query.value(0).toString(), query.value(1).toInt()});
+            results.append(query.value(0).toString());
         }
     }
 
-    LOG_DEBUG("top domains query finished for id {} found {} domains", request_id, results.size());
-    emit top_domains_ready(request_id, results);
+    LOG_DEBUG("all domains query finished for id {} found {} domains", request_id, results.size());
+    emit all_domains_ready(request_id, results);
+}
+
+void database_manager::get_dns_details_for_domain(quint64 request_id, const QString& domain, const QDateTime& start, const QDateTime& end)
+{
+    LOG_DEBUG("dns details request id {} for domain {}", request_id, domain.toStdString());
+    QList<dns_query_info> results;
+    if (!db_.isOpen())
+    {
+        LOG_WARN("cannot get dns details db not open");
+        emit dns_details_ready(request_id, results);
+        return;
+    }
+
+    QSqlQuery query(db_);
+    query.prepare(
+        "SELECT timestamp, transaction_id, direction, query_domain, query_type, response_code, response_data, resolver_ip "
+        "FROM dns_logs "
+        "WHERE query_domain = :domain AND timestamp BETWEEN :start_ts AND :end_ts "
+        "ORDER BY timestamp DESC");
+
+    query.bindValue(":domain", domain);
+    query.bindValue(":start_ts", start.toMSecsSinceEpoch());
+    query.bindValue(":end_ts", end.toMSecsSinceEpoch());
+
+    if (!query.exec())
+    {
+        LOG_ERROR("db get dns details for {} failed {}", domain.toStdString(), query.lastError().text().toStdString());
+    }
+    else
+    {
+        while (query.next())
+        {
+            dns_query_info info;
+            info.timestamp = QDateTime::fromMSecsSinceEpoch(query.value(0).toLongLong());
+            info.transaction_id = static_cast<quint16>(query.value(1).toUInt());
+            info.direction = static_cast<dns_query_info::packet_direction>(query.value(2).toInt());
+            info.query_domain = query.value(3).toString();
+            info.query_type = query.value(4).toString();
+            info.response_code = query.value(5).toString();
+            info.response_data = query.value(6).toString().split(", ", Qt::SkipEmptyParts);
+            info.resolver_ip = query.value(7).toString();
+            results.append(info);
+        }
+    }
+    LOG_DEBUG("dns details query finished for id {} found {} records", request_id, results.size());
+    emit dns_details_ready(request_id, results);
 }

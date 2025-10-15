@@ -75,7 +75,7 @@ dns_collector::~dns_collector() { stop_capture(); }
 void dns_collector::start_capture()
 {
     LOG_INFO("attempting to start dns capture in thread {}", QThread::currentThreadId());
-    device_ = pcpp::PcapLiveDeviceList::getInstance().getDeviceByName("ens32");
+    device_ = pcpp::PcapLiveDeviceList::getInstance().getPcapLiveDeviceByName("eno1");
     if (device_ == nullptr)
     {
         LOG_ERROR("could not find a default pcap device. dns capture will not start");
