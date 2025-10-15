@@ -22,6 +22,17 @@ static constexpr auto kChartIntervalSecs = 10L;
 static constexpr auto kHistoryDurationSecs = 180;
 static constexpr auto kSnapBackTimeoutMs = 5000;
 
+enum class dns_details_column : uint8_t
+{
+    kTimestamp,
+    kDirection,
+    kQueryType,
+    kResponseCode,
+    kResponseData,
+    kResolverIp,
+    kColumnCount
+};
+
 dns_page::dns_page(QWidget* parent) : QWidget(parent)
 {
     setup_chart();
@@ -68,7 +79,8 @@ void dns_page::setup_ui()
     all_domains_view_->setSelectionMode(QAbstractItemView::SingleSelection);
     all_domains_view_->setSortingEnabled(true);
 
-    domain_details_model_ = new QStandardItemModel(0, 6, this);
+    domain_details_model_ = new QStandardItemModel(0, static_cast<int>(dns_details_column::kColumnCount), this);
+
     domain_details_model_->setHorizontalHeaderLabels({"时间", "方向", "类型", "响应码", "响应数据", "解析器 IP"});
     domain_details_view_ = new QTableView(this);
     domain_details_view_->setModel(domain_details_model_);
@@ -276,7 +288,10 @@ void dns_page::handle_dns_details_ready(quint64 request_id, const QList<dns_quer
             row_items.append(placeholder_item);
             row_items.append(new QStandardItem());
             domain_details_model_->appendRow(row_items);
-            domain_details_view_->setSpan(i, 3, 1, 2);
+
+            const int start_col = static_cast<int>(dns_details_column::kResponseCode);
+            const int col_span = 2;
+            domain_details_view_->setSpan(i, start_col, 1, col_span);
         }
         else
         {
@@ -285,7 +300,8 @@ void dns_page::handle_dns_details_ready(quint64 request_id, const QList<dns_quer
             domain_details_model_->appendRow(row_items);
         }
 
-        domain_details_model_->setItem(i, 5, new QStandardItem(info.resolver_ip));
+        const int resolver_col = static_cast<int>(dns_details_column::kResolverIp);
+        domain_details_model_->setItem(i, resolver_col, new QStandardItem(info.resolver_ip));
     }
 }
 

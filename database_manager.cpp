@@ -1,6 +1,7 @@
 #include <cstdlib>
 #include <QThread>
 #include <QVariant>
+#include <QVariantList>
 #include <QtSql/QSqlQuery>
 #include <QtSql/QSqlError>
 
@@ -105,7 +106,12 @@ void database_manager::add_snapshots(const QList<interface_stats>& stats_list, c
         return;
     }
 
-    db_.transaction();
+    if (!db_.transaction())
+    {
+        LOG_ERROR("db failed to start transaction {}", db_.lastError().text().toStdString());
+        return;
+    }
+
     QSqlQuery query(db_);
     query.prepare(
         "INSERT OR REPLACE INTO traffic_snapshots (timestamp, interface_name, bytes_received, bytes_sent) "
@@ -113,18 +119,37 @@ void database_manager::add_snapshots(const QList<interface_stats>& stats_list, c
 
     qint64 ts_msecs = timestamp.toMSecsSinceEpoch();
 
+    QVariantList timestamps;
+    QVariantList interface_names;
+    QVariantList bytes_received_list;
+    QVariantList bytes_sent_list;
+
+    timestamps.reserve(stats_list.size());
+    interface_names.reserve(stats_list.size());
+    bytes_received_list.reserve(stats_list.size());
+    bytes_sent_list.reserve(stats_list.size());
+
     for (const auto& stats : stats_list)
     {
-        query.bindValue(0, ts_msecs);
-        query.bindValue(1, stats.name);
-        query.bindValue(2, QVariant::fromValue(stats.bytes_received));
-        query.bindValue(3, QVariant::fromValue(stats.bytes_sent));
-        if (!query.exec())
+        timestamps.append(ts_msecs);
+        interface_names.append(stats.name);
+        bytes_received_list.append(static_cast<qlonglong>(stats.bytes_received));
+        bytes_sent_list.append(static_cast<qlonglong>(stats.bytes_sent));
+    }
+
+    query.addBindValue(timestamps);
+    query.addBindValue(interface_names);
+    query.addBindValue(bytes_received_list);
+    query.addBindValue(bytes_sent_list);
+
+    if (!query.execBatch())
+    {
+        LOG_ERROR("db batch add snapshot failed {}", query.lastError().text().toStdString());
+        if (!db_.rollback())
         {
-            LOG_ERROR("db add snapshot failed {} {}", stats.name.toStdString(), query.lastError().text().toStdString());
-            db_.rollback();
-            return;
+            LOG_ERROR("db rollback failed after batch error {}", db_.lastError().text().toStdString());
         }
+        return;
     }
 
     if (!db_.commit())
@@ -132,7 +157,6 @@ void database_manager::add_snapshots(const QList<interface_stats>& stats_list, c
         LOG_ERROR("db transaction commit failed {}", db_.lastError().text().toStdString());
     }
 }
-
 void database_manager::add_dns_log(const dns_query_info& info)
 {
     if (!db_.isOpen())

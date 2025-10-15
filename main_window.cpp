@@ -78,11 +78,6 @@ main_window::main_window(QWidget* parent) : QMainWindow(parent), snap_back_timer
     tooltip_->setBrush(Qt::white);
     tooltip_->setPen(QPen(Qt::black));
     tooltip_->hide();
-
-    const QDateTime now = QDateTime::currentDateTime();
-    const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
-    const QDateTime start_time = now.addMSecs(-visible_window_msecs);
-    load_data_for_display(start_time, now);
 }
 
 main_window::~main_window()
@@ -199,6 +194,9 @@ void main_window::setup_workers()
 }
 void main_window::on_database_ready()
 {
+    LOG_INFO("performing initial data load for live view");
+    transition_to_live_view();
+
     LOG_INFO("received database_ready signal requesting initial data load");
     emit initial_data_load_requested();
 }
@@ -322,6 +320,22 @@ void main_window::append_live_data_point(const interface_stats& current_stats, c
     series_pair.last_stats = current_stats;
     series_pair.last_stats.timestamp = timestamp;
 }
+void main_window::transition_to_live_view()
+{
+    if (!is_manual_view_active_ && chart_->title() == "实时网络速度")
+    {
+        return;
+    }
+    LOG_INFO("Transitioning to live view mode.");
+    is_manual_view_active_ = false;
+    chart_->setTitle("实时网络速度");
+
+    const QDateTime now = QDateTime::currentDateTime();
+    const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
+    const QDateTime start_time = now.addMSecs(-visible_window_msecs);
+
+    load_data_for_display(start_time, now);
+}
 
 void main_window::process_new_interfaces()
 {
@@ -363,12 +377,7 @@ void main_window::on_interaction_finished()
 void main_window::snap_back_to_live_view()
 {
     LOG_INFO("snapback timer fired resetting to live view");
-    is_manual_view_active_ = false;
-    chart_->setTitle("实时网络速度");
-    const QDateTime now = QDateTime::currentDateTime();
-    const qint64 visible_window_msecs = kVisibleWindowMinutes * 60L * 1000;
-    QDateTime query_start_time = now.addMSecs(-visible_window_msecs);
-    load_data_for_display(query_start_time, now);
+    transition_to_live_view();
 }
 
 void main_window::setup_chart()

@@ -89,6 +89,7 @@ class main_window : public QMainWindow
     void setup_tray_icon();
     void process_loaded_data_batch();
     void append_live_data_point(const interface_stats& current_stats, const QDateTime& timestamp);
+    void transition_to_live_view();
 
    private:
     QStackedWidget* central_stacked_widget_ = nullptr;

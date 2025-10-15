@@ -20,7 +20,7 @@ void draggable_chartview::mousePressEvent(QMouseEvent *event)
 {
     if (drag_enabled_ && event->button() == Qt::LeftButton)
     {
-        LOG_WARN("dragging is enabled and left button is pressed");
+        LOG_DEBUG("dragging is enabled and left button is pressed");
         dragging_ = true;
         last_mouse_pos_ = event->pos();
         setCursor(Qt::ClosedHandCursor);
@@ -67,7 +67,7 @@ void draggable_chartview::mouseReleaseEvent(QMouseEvent *event)
 {
     if (dragging_ && event->button() == Qt::LeftButton)
     {
-        LOG_WARN("dragging finished");
+        LOG_DEBUG("dragging finished");
         dragging_ = false;
         unsetCursor();
         emit view_changed_by_drag();
